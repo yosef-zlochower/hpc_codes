@@ -1,4 +1,5 @@
 #include "gf.h"
+#include "comm.h"
 #include "multigrid.h"
 #include "gauss_seidel.h"
 #include <assert.h>
@@ -748,6 +749,11 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
             /* Recursive V-cycle.  On return, the child has prolonged its
              * correction into gfs->vars[VAR_SOL]. */
             vcycle_3d(child, n_smooth, omega, tol, subcycles);
+
+            /* Synchronise VAR_SOL ghost zones: prolong_var_3d modifies
+             * interior fine-grid points but leaves ghost zones stale at
+             * rank boundaries.  Must sync before post-smoothing reads them. */
+            sync_var_3d(gfs, VAR_SOL);
 
             /* Post-smoothing: standard omega pass, then plain Gauss-Seidel.
              * gauss_seidel_3d syncs VAR_SOL on exit of each call. */

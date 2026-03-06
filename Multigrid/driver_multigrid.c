@@ -33,22 +33,27 @@ int main(int argc, char **argv)
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
-    if (param.global_nx < 2 || param.global_ny < 2 || param.global_nz < 2)
+    if (param.global_nx_cells < 1 || param.global_ny_cells < 1 || param.global_nz_cells < 1)
     {
         if (mpi_rank == 0)
             fprintf(stderr,
-                    "Error: nx=%lld ny=%lld nz=%lld — "
-                    "each dimension needs at least 2 grid points.\n",
-                    (long long)param.global_nx,
-                    (long long)param.global_ny,
-                    (long long)param.global_nz);
+                    "Error: nx_cells=%lld ny_cells=%lld nz_cells=%lld — "
+                    "each dimension needs at least 1 cell.\n",
+                    (long long)param.global_nx_cells,
+                    (long long)param.global_ny_cells,
+                    (long long)param.global_nz_cells);
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
+    /* Grid points = cells + 1 (node-based grid) */
+    const int64_t global_nx = param.global_nx_cells + 1;
+    const int64_t global_ny = param.global_ny_cells + 1;
+    const int64_t global_nz = param.global_nz_cells + 1;
+
     /* ---- Domain decomposition ---- */
-    size_t dims[3]     = { (size_t)param.global_nx,
-                           (size_t)param.global_ny,
-                           (size_t)param.global_nz };
+    size_t dims[3]     = { (size_t)global_nx,
+                           (size_t)global_ny,
+                           (size_t)global_nz };
     size_t topology[3] = { 0, 0, 0 };
     automatic_topology(3, dims, (size_t)mpi_size, topology);
 
@@ -57,16 +62,16 @@ int main(int argc, char **argv)
     const int pz = (int)topology[2];
 
     /* Grid spacing for a node-based grid on [0,1]^3 */
-    const double dx = 1.0 / (param.global_nx - 1);
-    const double dy = 1.0 / (param.global_ny - 1);
-    const double dz = 1.0 / (param.global_nz - 1);
+    const double dx = 1.0 / (global_nx - 1);
+    const double dy = 1.0 / (global_ny - 1);
+    const double dz = 1.0 / (global_nz - 1);
 
     /* ---- Allocate root grid (gs=1 for 7-point stencil) ---- */
     struct ngfs_3d gfs;
     gfs.vars = NULL;
 
     setup_3d_domain(px, py, pz, mpi_rank,
-                    param.global_nx, param.global_ny, param.global_nz,
+                    global_nx, global_ny, global_nz,
                     /*gs=*/1,
                     0.0, 0.0, 0.0,
                     dx, dy, dz,
@@ -88,9 +93,9 @@ int main(int argc, char **argv)
     if (mpi_rank == 0)
     {
         printf("Grid:     %lld x %lld x %lld\n",
-               (long long)param.global_nx,
-               (long long)param.global_ny,
-               (long long)param.global_nz);
+               (long long)global_nx,
+               (long long)global_ny,
+               (long long)global_nz);
         printf("Topology: %zu x %zu x %zu  (%d ranks)\n",
                topology[0], topology[1], topology[2], mpi_size);
         printf("Solver:   %s\n",

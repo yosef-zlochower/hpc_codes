@@ -1,7 +1,7 @@
 [grid]
-nx = 65        # global grid points in x  (positive integer)
-ny = 65        # global grid points in y
-nz = 65        # global grid points in z
+nx_cells = 256  # cells in x; grid points = nx_cells + 1 (must be of the form 2^p * c, c odd)
+ny_cells = 256  # cells in y
+nz_cells = 256  # cells in z
 
 [solver]
 multigrid = true   # true  -> multigrid V-cycle

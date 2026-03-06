@@ -18,9 +18,9 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
         return -1;
     }
 
-    param->global_nx = parameters::get_positive_integer_value("grid", "nx", tbl);
-    param->global_ny = parameters::get_positive_integer_value("grid", "ny", tbl);
-    param->global_nz = parameters::get_positive_integer_value("grid", "nz", tbl);
+    param->global_nx_cells = parameters::get_positive_integer_value("grid", "nx_cells", tbl);
+    param->global_ny_cells = parameters::get_positive_integer_value("grid", "ny_cells", tbl);
+    param->global_nz_cells = parameters::get_positive_integer_value("grid", "nz_cells", tbl);
 
     param->omega    = parameters::get_positive_real_value    ("solver", "omega",    tbl);
     param->n_smooth = (int)parameters::get_positive_integer_value("solver", "n_smooth", tbl);

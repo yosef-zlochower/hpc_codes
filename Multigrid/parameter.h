@@ -7,9 +7,9 @@
 
 struct param_st
 {
-    int64_t global_nx;
-    int64_t global_ny;
-    int64_t global_nz;
+    int64_t global_nx_cells; /* number of cells in x; grid points = cells + 1 */
+    int64_t global_ny_cells; /* number of cells in y; grid points = cells + 1 */
+    int64_t global_nz_cells; /* number of cells in z; grid points = cells + 1 */
     double  omega;
     int     n_smooth;
     int     n_iters;
