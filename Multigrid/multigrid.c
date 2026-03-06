@@ -724,9 +724,9 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
     double defect_norm = calc_defect_3d(gfs);
     vcycle_debug(rank, level, "defect = %12.6e  (level %d, %ld x %ld x %ld)",
                  defect_norm, level,
-                 (long)gfs->domain.global_ni,
-                 (long)gfs->domain.global_nj,
-                 (long)gfs->domain.global_nk);
+                 (long)gfs->domain.global_ni - 1,
+                 (long)gfs->domain.global_nj - 1,
+                 (long)gfs->domain.global_nk - 1);
 
     if (gfs->child != NULL && defect_norm > tol)
     {
