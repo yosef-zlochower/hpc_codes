@@ -1,3 +1,8 @@
+CC       = mpicc
+CXX      = mpicxx
+CFLAGS   = -Wall -O3 -ffast-math -g
+CXXFLAGS = -Wall -O3 -ffast-math -g -std=c++17
+
 SRCS = domain.c  gf.c timer.c comm.c multigrid.c gauss_seidel.c io.c
 OBJS = domain.o  gf.o  timer.o comm.o multigrid.o gauss_seidel.o io.o
 HDRS = domain.h   gf.h multigrid.h  timer.h comm.h io.h
@@ -16,67 +21,76 @@ TEST_OBJS = tests/test_domain_2d.o tests/test_domain_3d.o \
             tests/test_restrict_nl_2d.o tests/test_restrict_nl_3d.o \
             tests/test_prolong_nl_2d.o  tests/test_prolong_nl_3d.o
 
+# ── C source rules ────────────────────────────────────────────────────────────
+
 %.o: %.c  $(HDRS)
-	mpicc  -c -Wall -O3 -ffast-math  -g  $<
+	$(CC)  -c $(CFLAGS)  $<
 
 tests/%.o: tests/%.c  $(HDRS)
-	mpicc  -c -Wall -O3 -ffast-math  -g  -I.  -o $@  $<
+	$(CC)  -c $(CFLAGS)  -I.  -o $@  $<
 
 gauss_seidel.o: gauss_seidel.c gauss_seidel.h $(HDRS)
-	mpicc -c -Wall -O3 -ffast-math -g $<
+	$(CC) -c $(CFLAGS) $<
 
 multigrid.o: multigrid.c gauss_seidel.h $(HDRS)
-	mpicc -c -Wall -O3 -ffast-math -g $<
+	$(CC) -c $(CFLAGS) $<
 
-driver.o: driver.c gauss_seidel.h $(HDRS)
-	mpicc -c -Wall -O3 -ffast-math -g $<
+driver_multigrid.o: driver_multigrid.c gauss_seidel.h multigrid.h parameter.h $(HDRS)
+	$(CC) -c $(CFLAGS) $<
 
-driver_multigrid.o: driver_multigrid.c gauss_seidel.h multigrid.h $(HDRS)
-	mpicc -c -Wall -O3 -ffast-math -g $<
+# ── C++ source rules ──────────────────────────────────────────────────────────
 
-driver: driver.o $(OBJS)
-	mpicc -g $^ -o $@ -lm
+parameter.o: parameter.cc parameter.h toml.hpp
+	$(CXX) -c $(CXXFLAGS) $< -o $@
 
-driver_multigrid: driver_multigrid.o $(OBJS)
-	mpicc -g $^ -o $@ -lm
+multigrid_parameters.o: multigrid_parameters.cc parameter.h toml.hpp
+	$(CXX) -c $(CXXFLAGS) $< -o $@
+
+# ── Executables ───────────────────────────────────────────────────────────────
+
+# Link with mpicxx so the C++ runtime is included alongside the MPI C objects
+driver_multigrid: driver_multigrid.o parameter.o multigrid_parameters.o $(OBJS)
+	$(CXX) -g $^ -o $@ -lm
 
 all: $(OBJS)
 
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
 tests/test_domain_2d: $(OBJS) tests/test_domain_2d.o
-	mpicc -g $(OBJS)  tests/test_domain_2d.o -o $@ -lm
+	$(CC) -g $(OBJS)  tests/test_domain_2d.o -o $@ -lm
 
 tests/test_domain_3d: $(OBJS) tests/test_domain_3d.o
-	mpicc -g $(OBJS)  tests/test_domain_3d.o -o $@ -lm
+	$(CC) -g $(OBJS)  tests/test_domain_3d.o -o $@ -lm
 
 tests/test_child_2d: $(OBJS) tests/test_child_2d.o
-	mpicc -g $(OBJS) tests/test_child_2d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_child_2d.o -o $@ -lm
 
 tests/test_child_3d: $(OBJS) tests/test_child_3d.o
-	mpicc -g $(OBJS) tests/test_child_3d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_child_3d.o -o $@ -lm
 
 tests/test_project_2d: $(OBJS) tests/test_project_2d.o
-	mpicc -g $(OBJS) tests/test_project_2d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_project_2d.o -o $@ -lm
 
 tests/test_project_3d: $(OBJS) tests/test_project_3d.o
-	mpicc -g $(OBJS) tests/test_project_3d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_project_3d.o -o $@ -lm
 
 tests/test_prolong_2d: $(OBJS) tests/test_prolong_2d.o
-	mpicc -g $(OBJS) tests/test_prolong_2d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_prolong_2d.o -o $@ -lm
 
 tests/test_prolong_3d: $(OBJS) tests/test_prolong_3d.o
-	mpicc -g $(OBJS) tests/test_prolong_3d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_prolong_3d.o -o $@ -lm
 
 tests/test_restrict_nl_2d: $(OBJS) tests/test_restrict_nl_2d.o
-	mpicc -g $(OBJS) tests/test_restrict_nl_2d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_restrict_nl_2d.o -o $@ -lm
 
 tests/test_restrict_nl_3d: $(OBJS) tests/test_restrict_nl_3d.o
-	mpicc -g $(OBJS) tests/test_restrict_nl_3d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_restrict_nl_3d.o -o $@ -lm
 
 tests/test_prolong_nl_2d: $(OBJS) tests/test_prolong_nl_2d.o
-	mpicc -g $(OBJS) tests/test_prolong_nl_2d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_prolong_nl_2d.o -o $@ -lm
 
 tests/test_prolong_nl_3d: $(OBJS) tests/test_prolong_nl_3d.o
-	mpicc -g $(OBJS) tests/test_prolong_nl_3d.o -o $@ -lm
+	$(CC) -g $(OBJS) tests/test_prolong_nl_3d.o -o $@ -lm
 
 tests: $(TEST_PROGS)
 	cd tests && bash run_test.sh
@@ -86,5 +100,11 @@ tests: $(TEST_PROGS)
 	cd tests && bash run_test_restrict_nl.sh
 	cd tests && bash run_test_prolong_nl.sh
 
+# ── Clean ─────────────────────────────────────────────────────────────────────
+
 clean:
-	-rm $(OBJS) driver.o driver driver_multigrid.o driver_multigrid $(TEST_PROGS) $(TEST_OBJS)
+	-rm $(OBJS) \
+	    driver_multigrid.o driver_multigrid \
+	    parameter.o multigrid_parameters.o \
+	    driver_multigrid_parameters.o \
+	    $(TEST_PROGS) $(TEST_OBJS)

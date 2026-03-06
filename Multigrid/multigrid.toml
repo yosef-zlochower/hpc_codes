@@ -1,0 +1,16 @@
+[grid]
+nx = 65        # global grid points in x  (positive integer)
+ny = 65        # global grid points in y
+nz = 65        # global grid points in z
+
+[solver]
+multigrid = true   # true  -> multigrid V-cycle
+                   # false -> plain Gauss-Seidel (single-grid)
+omega     = 1.5    # SOR relaxation parameter (0 < omega < 2)
+n_smooth  = 100      # Gauss-Seidel sweeps per smoothing call
+n_iters   = 20     # maximum outer iterations (V-cycles or GS iterations)
+tol       = 1.0e-9 # convergence tolerance on L-infinity defect norm
+
+# The following are used only when multigrid = true
+subcycles = 1      # coarse-grid sub-cycles per level (1 = V-cycle, 2 = W-like)
+min_cells = 4      # minimum interior cells per rank before coarsening stops
