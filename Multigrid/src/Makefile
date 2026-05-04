@@ -21,6 +21,8 @@ TEST_OBJS = tests/test_domain_2d.o tests/test_domain_3d.o \
             tests/test_restrict_nl_2d.o tests/test_restrict_nl_3d.o \
             tests/test_prolong_nl_2d.o  tests/test_prolong_nl_3d.o
 
+all: driver_multigrid
+
 # ── C source rules ────────────────────────────────────────────────────────────
 
 %.o: %.c  $(HDRS)
@@ -52,7 +54,6 @@ multigrid_parameters.o: multigrid_parameters.cc parameter.h toml.hpp
 driver_multigrid: driver_multigrid.o parameter.o multigrid_parameters.o $(OBJS)
 	$(CXX) -g $^ -o $@ -lm
 
-all: $(OBJS)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -92,19 +93,23 @@ tests/test_prolong_nl_2d: $(OBJS) tests/test_prolong_nl_2d.o
 tests/test_prolong_nl_3d: $(OBJS) tests/test_prolong_nl_3d.o
 	$(CC) -g $(OBJS) tests/test_prolong_nl_3d.o -o $@ -lm
 
-tests: $(TEST_PROGS)
+tests: $(TEST_PROGS) driver_multigrid
 	cd tests && bash run_test.sh
 	cd tests && bash run_test_child.sh
 	cd tests && bash run_test_project.sh
 	cd tests && bash run_test_prolong.sh
 	cd tests && bash run_test_restrict_nl.sh
 	cd tests && bash run_test_prolong_nl.sh
+	cd tests && bash run_test_convergence.sh
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 
 clean:
-	-rm $(OBJS) \
-	    driver_multigrid.o driver_multigrid \
-	    parameter.o multigrid_parameters.o \
-	    driver_multigrid_parameters.o \
-	    $(TEST_PROGS) $(TEST_OBJS)
+	$(RM) $(OBJS) \
+	      driver_multigrid.o driver_multigrid \
+	      parameter.o multigrid_parameters.o \
+	      $(TEST_PROGS) $(TEST_OBJS)
+	$(RM) -r tests/convergence_run
+
+distclean: clean
+	$(RM) *.json tests/*.json

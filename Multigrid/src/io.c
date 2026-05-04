@@ -1,6 +1,10 @@
 #include "gf.h"
 #include "domain.h"
+#include <errno.h>
+#include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+#include <mpi.h>
 
 /******************************************************************
 * Purpose: Write the local patch of a 2D grid variable to a JSON file named
@@ -28,6 +32,12 @@ void output_2d_gf(struct ngfs_2d *gfs, int var)
         snprintf(fname, sizeof(fname), "VAR_%d_rank_%d.json", var, gfs->domain.rank);
     }
     FILE *f = fopen(fname, "w");
+    if (!f)
+    {
+        fprintf(stderr, "rank %d: cannot open '%s' for writing: %s\n",
+                gfs->domain.rank, fname, strerror(errno));
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
     fprintf(f, "{\n");
     fprintf(f, "    \"nx\": %ld,\n", (long)gfs->nx);
     fprintf(f, "    \"ny\": %ld,\n", (long)gfs->ny);
@@ -95,6 +105,12 @@ void output_3d_gf(struct ngfs_3d *gfs, int var)
     }
 
     FILE *f = fopen(fname, "w");
+    if (!f)
+    {
+        fprintf(stderr, "rank %d: cannot open '%s' for writing: %s\n",
+                gfs->domain.rank, fname, strerror(errno));
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
     fprintf(f, "{\n");
     fprintf(f, "    \"nx\": %ld,\n", (long)gfs->nx);
     fprintf(f, "    \"ny\": %ld,\n", (long)gfs->ny);

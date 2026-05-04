@@ -5,43 +5,72 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-# Build all object files
-make all
+# Build the driver (default target)
+make
 
-# Build the plain Gauss-Seidel driver
-make driver
-
-# Build the multigrid V-cycle driver
+# Equivalent: build the multigrid driver explicitly
 make driver_multigrid
 
-# Build all test binaries
+# Build and run the full test suite (operator unit tests + end-to-end
+# convergence test).  Depends on driver_multigrid being built.
 make tests
 
-# Run all tests (must be run from tests/ directory)
-cd tests && bash run_test.sh
-cd tests && bash run_test_child.sh
-cd tests && bash run_test_project.sh
-cd tests && bash run_test_prolong.sh
-cd tests && bash run_test_restrict_nl.sh
-cd tests && bash run_test_prolong_nl.sh
+# Run tests individually (must be run from tests/ directory)
+cd tests && bash run_test.sh                # MPI domain decomposition
+cd tests && bash run_test_child.sh          # multigrid hierarchy
+cd tests && bash run_test_project.sh        # injection + restriction
+cd tests && bash run_test_prolong.sh        # linear prolongation
+cd tests && bash run_test_restrict_nl.sh    # full-weighting restriction
+cd tests && bash run_test_prolong_nl.sh     # trilinear prolongation
+cd tests && bash run_test_convergence.sh    # end-to-end second-order rate
 
-# Clean
+# Clean (also removes tests/convergence_run/)
 make clean
+
+# Clean + remove all per-rank JSON output
+make distclean
 ```
 
-Compiler: `mpicc` with `-Wall -O3 -ffast-math -g`. Tests use Python (`verify.py`, `verify_nl_prolong.py`, etc.) to check correctness by reconstructing the global solution from per-rank JSON output.
+Compilers: `mpicc` (C, `-Wall -O3 -ffast-math -g`) and `mpicxx` (C++17 for the
+TOML parameter reader).  The final link uses `mpicxx` so the C++ standard
+library runtime is included alongside the C objects.  Tests use Python
+(`verify.py`, `verify_nl_prolong.py`, `verify_convergence.py`, etc.) to
+check correctness by reconstructing the global solution from per-rank
+JSON output, or by parsing the driver's printed error.
 
-## Running the Solvers
+## Running the Solver
+
+The driver takes a single argument: the path to a TOML parameter file.
 
 ```bash
-# Plain Gauss-Seidel solver
-mpirun -np <N> ./driver NX NY NZ [omega] [n_smooth] [n_iters]
-
-# Multigrid V-cycle solver
-mpirun -np <N> ./driver_multigrid NX NY NZ [omega] [n_smooth] [n_iters] [subcycles] [min_cells] [tol]
+mpirun -np <N> ./driver_multigrid <params.toml>
 ```
 
-Both solve the 3D Poisson equation with manufactured solution `u = sin(πx)sin(πy)sin(πz)` on `[0,1]^3` with homogeneous Dirichlet BCs.
+A sample `multigrid.toml` is shipped in this directory.  The single
+binary supports both the multigrid V-cycle (`multigrid = true`) and a
+plain red-black Gauss-Seidel SOR (`multigrid = false`); the choice is
+made at runtime.
+
+Required TOML keys:
+
+| Section / key      | Type   | Meaning                                                |
+|--------------------|--------|--------------------------------------------------------|
+| `[grid] nx_cells`  | int    | cells in x; grid points = `nx_cells + 1`               |
+| `[grid] ny_cells`  | int    | cells in y                                             |
+| `[grid] nz_cells`  | int    | cells in z                                             |
+| `[solver] multigrid` | bool | `true` → V-cycle, `false` → single-grid GS             |
+| `[solver] omega`   | float  | SOR relaxation parameter (`0 < omega < 2`)             |
+| `[solver] n_smooth`| int    | red-black GS iterations per smoothing call             |
+| `[solver] n_iters` | int    | maximum outer iterations                               |
+| `[solver] tol`     | float  | convergence threshold on `|defect|_inf`                |
+| `[solver] subcycles` | int  | (multigrid only) max coarse-grid visits per level      |
+| `[solver] min_cells` | int  | (multigrid only) min interior cells per rank per axis  |
+
+The driver solves the 3D Poisson equation with manufactured solution
+`u = sin(πx) sin(πy) sin(πz)` on `[0,1]^3` with homogeneous Dirichlet
+BCs, and prints `|u - u_exact|_inf` at exit.  See `../doc/documentation.tex`
+for the full algorithmic description and guidance on extending the code
+to other source terms and boundary conditions.
 
 ## Architecture
 
@@ -77,4 +106,16 @@ Contains standalone Python/Numba implementations (1D, 2D, 3D) used as reference 
 
 ### Tests
 
-Each test binary exercises a specific operator (domain decomposition, hierarchy creation, projection, prolongation, restriction) in both 2D and 3D. Test scripts invoke `mpirun --map-by :OVERSUBSCRIBE` so tests run on any machine regardless of core count. Python verification scripts reconstruct the global field from per-rank JSON files and check correctness.
+Each operator-level test binary exercises a specific operation (domain
+decomposition, hierarchy creation, injection, restriction, prolongation)
+in both 2D and 3D. Test scripts invoke `mpirun --map-by :OVERSUBSCRIBE`
+so tests run on any machine regardless of core count. Python verification
+scripts reconstruct the global field from per-rank JSON files and check
+correctness.
+
+In addition to the operator-level tests, `run_test_convergence.sh` runs
+the full driver against an auto-generated TOML at three grid resolutions
+(32³, 64³, 128³) on both `np=1` and `np=8`, parses the printed
+`|u - u_exact|_inf`, and asserts that the empirical convergence rate on
+the finest pair lies in `[1.8, 2.3]`. The expected rate for the
+seven-point Laplacian on this manufactured solution is exactly 2.

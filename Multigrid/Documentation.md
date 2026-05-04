@@ -10,7 +10,7 @@ with a manufactured source
 $f(x,y,z) = -3\pi^2 \sin(\pi x)\sin(\pi y)\sin(\pi z)$, whose exact solution is $u_\text{exact}=\sin(\pi x)\sin(\pi y)\sin(\pi z)$.
 
 - **Grid.** Node-based, uniform on $[0,1]^3$. The TOML specifies cell counts; the code uses `NX = nx_cells + 1` grid points and spacing `dx = 1/(NX-1)` (similarly y, z). One layer of ghost cells (`gs = 1`) on every face.
-- **Operator.** Standard 7-point finite-difference Laplacian (`calc_defect_3d`, `gauss_seidel.c:196`):
+- **Operator.** Standard 7-point finite-difference Laplacian (`calc_defect_3d`, `src/gauss_seidel.c:196`):
   $L u_{ijk} = \tfrac{u_{i+1jk}-2u_{ijk}+u_{i-1jk}}{h_x^2} + \tfrac{u_{ij+1k}-2u_{ijk}+u_{ij-1k}}{h_y^2} + \tfrac{u_{ijk+1}-2u_{ijk}+u_{ijk-1}}{h_z^2}.$
 - **Defect.** $d_{ijk} = (Lu - f)_{ijk}$. (Note the sign convention: the code uses *defect = Lu − f*, not the residual *f − Lu*. This determines the sign of the prolongation update — see §6.)
 - **BCs.** Homogeneous Dirichlet, enforced by `apply_bc_3d` writing 0 to physical-boundary faces (any face not adjacent to an MPI neighbour).
@@ -23,7 +23,7 @@ $f(x,y,z) = -3\pi^2 \sin(\pi x)\sin(\pi y)\sin(\pi z)$, whose exact solution is 
 
 ## 3. Smoother — red-black Gauss–Seidel SOR
 
-`gauss_seidel_3d` (`gauss_seidel.c:86`) does `n_smooth` complete iterations, each consisting of a red half-sweep, ghost+BC sync, black half-sweep, ghost+BC sync.
+`gauss_seidel_3d` (`src/gauss_seidel.c:86`) does `n_smooth` complete iterations, each consisting of a red half-sweep, ghost+BC sync, black half-sweep, ghost+BC sync.
 
 - **Colouring** uses the *global* index parity, $\text{colour}(i,j,k) = (\,g_i + g_j + g_k\,) \bmod 2$, so the pattern is consistent across rank boundaries regardless of how the domain is decomposed.
 - **Update.** With weights computed once per level from the spacings,
@@ -33,7 +33,7 @@ $f(x,y,z) = -3\pi^2 \sin(\pi x)\sin(\pi y)\sin(\pi z)$, whose exact solution is 
 
 ## 4. Multigrid hierarchy construction
 
-`ngfs_3d_create_hierarchy` (`multigrid.c:228`) repeatedly calls `ngfs_3d_create_child`, halving `cells_x, cells_y, cells_z` (so grid points become `cells/2 + 1`) and doubling `dx, dy, dz`. Coarsening stops when either:
+`ngfs_3d_create_hierarchy` (`src/multigrid.c:228`) repeatedly calls `ngfs_3d_create_child`, halving `cells_x, cells_y, cells_z` (so grid points become `cells/2 + 1`) and doubling `dx, dy, dz`. Coarsening stops when either:
 
 1. any direction has an odd cell count (prevents exact 2:1 coarsening), or
 2. the minimum interior cell count per rank, reduced via `MPI_Allreduce` with `MPI_MIN`, falls below `min_cells`.
@@ -112,7 +112,7 @@ When `multigrid = false`, the parser still expects the file to be parseable but 
 
 ## 9. Extending to other source functions
 
-The grid hierarchy, smoother, and transfer operators are entirely source-agnostic. Only the right-hand side, BCs, and the verification block are problem-specific. To switch to a different $f$ on the same domain with the same Dirichlet BC $u=0$, you only need the RHS-init loop in `driver_multigrid.c:125–139`:
+The grid hierarchy, smoother, and transfer operators are entirely source-agnostic. Only the right-hand side, BCs, and the verification block are problem-specific. To switch to a different $f$ on the same domain with the same Dirichlet BC $u=0$, you only need the RHS-init loop in `src/driver_multigrid.c:125–139`:
 
 ```c
 for (int64_t k = 0; k < gfs.nz; k++) {
@@ -129,7 +129,7 @@ for (int64_t k = 0; k < gfs.nz; k++) {
 }
 ```
 
-The exact-error block at `driver_multigrid.c:168–185` should be replaced or removed unless you have a known $u_\text{exact}$.
+The exact-error block at `src/driver_multigrid.c:168–185` should be replaced or removed unless you have a known $u_\text{exact}$.
 
 The smoother coefficients in `gauss_seidel_3d` are derived from `dx, dy, dz` per level, so they automatically rescale on every coarse grid; nothing in the multigrid machinery depends on the form of $f$.
 
@@ -137,7 +137,7 @@ The smoother coefficients in `gauss_seidel_3d` are derived from `dx, dy, dz` per
 
 Two changes are needed:
 
-1. In `apply_bc_3d` (`gauss_seidel.c:21`), replace the `0.0` writes with the boundary value $g(x,y,z)$ at each face point. Compute the global coordinates from `gfs->x0 + i*gfs->dx`, etc.
+1. In `apply_bc_3d` (`src/gauss_seidel.c:21`), replace the `0.0` writes with the boundary value $g(x,y,z)$ at each face point. Compute the global coordinates from `gfs->x0 + i*gfs->dx`, etc.
 2. The coarse-level correction must remain *zero* on physical boundaries. The code already does the right thing: `vcycle_3d` zeroes `child.VAR_SOL` before recursion, `apply_bc_3d` is then called on the child (with `u = 0` semantics for the correction), and `prolong_var_3d` deliberately skips fine-grid physical boundary points so the BC values you set in step 1 are preserved.
 
 In other words, **only `apply_bc_3d` for the fine grid needs to know about $g$** — but on coarse grids the BC for the *correction* must stay 0, so do not change the coarse-level `apply_bc_3d` calls invoked by `vcycle_3d`. The cleanest way is to add a separate `apply_bc_3d_inhomogeneous` for fine-grid initialisation only, and leave the existing `apply_bc_3d` (called on coarse correction grids and on `VAR_DEF`) alone.

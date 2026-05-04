@@ -465,7 +465,7 @@ point reads at most one ghost cell on each axis.}\label{fig:ghost}
 \end{figure}
 
 \subsection{Smoother kernel: red-black Gauss--Seidel SOR}\label{sec:smoother-impl}
-The function \texttt{gauss\_seidel\_3d} (\texttt{gauss\_seidel.c:86}) implements
+The function \texttt{gauss\_seidel\_3d} (\texttt{src/gauss\_seidel.c:86}) implements
 \eqref{eq:sor} in red-black ordering with global parity
 $c(i,j,k) = (g_i+g_j+g_k)\bmod 2$, where $g_i = \mathtt{local\_i0} + i$
 is the global index of local point $i$.  Using the global parity --- not
@@ -490,7 +490,7 @@ The SOR update \eqref{eq:sor} is then $u_{ijk} \leftarrow (1-\omega)u_{ijk}
 + \omega \widetilde u_{ijk}$.
 
 \subsection{Defect}\label{sec:defect}
-\texttt{calc\_defect\_3d} (\texttt{gauss\_seidel.c:196}) evaluates
+\texttt{calc\_defect\_3d} (\texttt{src/gauss\_seidel.c:196}) evaluates
 $d_{ijk} = (\Delta_h u)_{ijk} - f_{ijk}$ at every interior point,
 zeros it on physical boundaries (so the defect is consistent with
 Dirichlet BCs), reduces the local maximum modulus across the Cartesian
@@ -499,7 +499,7 @@ synchronises the ghost layer of \texttt{VAR\_DEF} so that the
 restriction stencil can read complete data on the next call.
 
 \subsection{Hierarchy construction}\label{sec:hierarchy}
-\texttt{ngfs\_3d\_create\_hierarchy} (\texttt{multigrid.c:228}) builds
+\texttt{ngfs\_3d\_create\_hierarchy} (\texttt{src/multigrid.c:228}) builds
 the parent$\to$child linked list by repeatedly halving the cell counts
 in each direction and doubling the spacings.  The same Cartesian
 process grid is used at every level; coarsening reduces the per-rank
@@ -547,7 +547,7 @@ implementation details are worth highlighting:
 \end{itemize}
 
 \subsection{V-cycle}\label{sec:vcycle-impl}
-\texttt{vcycle\_3d} (\texttt{multigrid.c:711}) implements
+\texttt{vcycle\_3d} (\texttt{src/multigrid.c:711}) implements
 \Cref{alg:vcycle}.
 
 \begin{lstlisting}[caption={V-cycle pseudocode (matches
@@ -696,7 +696,7 @@ therefore highly localised.
 \subsection{Different right-hand sides}\label{sec:other-source}
 To solve $\Delta u = f$ for a different $f$ on the same domain with the
 same homogeneous Dirichlet condition, edit only the RHS-init loop in
-\texttt{driver\_multigrid.c} (lines 125--139):
+\texttt{src/driver\_multigrid.c} (lines 125--139):
 \begin{lstlisting}
 for (int64_t k = 0; k < gfs.nz; k++) {
     const double z = gfs.z0 + k * gfs.dz;
@@ -720,7 +720,7 @@ A cleaner refactor is to introduce a function pointer
 recommended student exercise.
 
 \subsection{Inhomogeneous Dirichlet, $u = g$ on $\partial\Omega$}\label{sec:bc-dirichlet}
-The function \texttt{apply\_bc\_3d} (\texttt{gauss\_seidel.c:21})
+The function \texttt{apply\_bc\_3d} (\texttt{src/gauss\_seidel.c:21})
 currently writes $0$ on every physical-boundary face.  To enforce $u=g$,
 replace those writes with the value of $g$ at the corresponding global
 coordinate, e.g.

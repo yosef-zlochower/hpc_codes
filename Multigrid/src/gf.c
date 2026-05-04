@@ -40,7 +40,7 @@ int ngfs_3d_allocate(int nvars, struct ngfs_3d *ptr)
     ptr->z0 = ptr->domain.global_z0 + ptr->domain.local_k0 * ptr->domain.dz;
 
     ptr->vars = calloc(nvars, sizeof(struct gf *));
-    assert(ptr->nvars);
+    assert(ptr->vars);
 
     char *vname = NULL;
     const size_t name_length = 20;
@@ -112,7 +112,7 @@ int ngfs_2d_allocate(int nvars, struct ngfs_2d *ptr)
     ptr->y0 = ptr->domain.global_y0 + ptr->domain.local_j0 * ptr->domain.dy;
 
     ptr->vars = calloc(nvars, sizeof(struct gf *));
-    assert(ptr->nvars);
+    assert(ptr->vars);
 
     char *vname = NULL;
     const size_t name_length = 20;
@@ -150,13 +150,16 @@ int ngfs_2d_allocate(int nvars, struct ngfs_2d *ptr)
 }
 
 /******************************************************************
-* Purpose: Free all variable slots and communication buffers owned
-*     by a 3D container, and recursively free any child hierarchy
-*     via ngfs_3d_free. Does not free the container struct itself or
-*     its domain.
+* Purpose: Recursively free the child chain rooted at ptr (if any),
+*     then free this container's variable slots and communication
+*     buffers.  Idempotent: safe to call on a NULL pointer or on a
+*     container whose vars/buffers have already been freed.  Does
+*     NOT touch ptr->parent, ptr->domain, or the struct itself --
+*     callers that own the heap allocation must call ngfs_3d_free
+*     instead.
 * Input Variables:
-*     ptr: struct ngfs_3d*, container to deallocate; ptr->vars must
-*         be non-NULL
+*     ptr: struct ngfs_3d*, container to deallocate; may be NULL or
+*         already-deallocated
 * Output Variables:
 *     ptr: struct ngfs_3d*, vars set to NULL, nvars/n/gs zeroed,
 *         all buffer pointers freed
@@ -165,10 +168,18 @@ int ngfs_2d_allocate(int nvars, struct ngfs_2d *ptr)
 *******************************************************************/
 int ngfs_3d_deallocate(struct ngfs_3d *ptr)
 {
-    if (ptr->child)
-        ngfs_3d_free(ptr->child);
+    if (!ptr) return 0;
 
-    assert(ptr->vars);
+    /* Free the child chain first.  ngfs_3d_free unlinks the child
+     * from ptr (sets ptr->child = NULL) before returning. */
+    if (ptr->child) {
+        ngfs_3d_free(ptr->child);
+        ptr->child = NULL;
+    }
+
+    /* Idempotent: nothing to free if allocate was never called or
+     * if deallocate has already run. */
+    if (!ptr->vars) return 0;
 
     for (int i = 0; i < ptr->nvars; i++)
     {
@@ -197,17 +208,25 @@ int ngfs_3d_deallocate(struct ngfs_3d *ptr)
     free(ptr->upper_z_src);
     free(ptr->upper_z_dst);
 
+    ptr->lower_x_src = ptr->lower_x_dst = NULL;
+    ptr->upper_x_src = ptr->upper_x_dst = NULL;
+    ptr->lower_y_src = ptr->lower_y_dst = NULL;
+    ptr->upper_y_src = ptr->upper_y_dst = NULL;
+    ptr->lower_z_src = ptr->lower_z_dst = NULL;
+    ptr->upper_z_src = ptr->upper_z_dst = NULL;
+
     return 0;
 }
 
 /******************************************************************
-* Purpose: Free all variable slots and communication buffers owned
-*     by a 2D container, and recursively free any child hierarchy
-*     via ngfs_2d_free. Does not free the container struct itself or
-*     its domain.
+* Purpose: Recursively free the child chain rooted at ptr (if any),
+*     then free this container's variable slots and communication
+*     buffers.  Idempotent: safe to call on a NULL pointer or on a
+*     container whose vars/buffers have already been freed.  Does
+*     NOT touch ptr->parent, ptr->domain, or the struct itself.
 * Input Variables:
-*     ptr: struct ngfs_2d*, container to deallocate; ptr->vars must
-*         be non-NULL
+*     ptr: struct ngfs_2d*, container to deallocate; may be NULL or
+*         already-deallocated
 * Output Variables:
 *     ptr: struct ngfs_2d*, vars set to NULL, nvars/n/gs zeroed,
 *         all buffer pointers freed
@@ -216,10 +235,14 @@ int ngfs_3d_deallocate(struct ngfs_3d *ptr)
 *******************************************************************/
 int ngfs_2d_deallocate(struct ngfs_2d *ptr)
 {
-    if (ptr->child)
-        ngfs_2d_free(ptr->child);
+    if (!ptr) return 0;
 
-    assert(ptr->vars);
+    if (ptr->child) {
+        ngfs_2d_free(ptr->child);
+        ptr->child = NULL;
+    }
+
+    if (!ptr->vars) return 0;
 
     for (int i = 0; i < ptr->nvars; i++)
     {
@@ -242,6 +265,11 @@ int ngfs_2d_deallocate(struct ngfs_2d *ptr)
     free(ptr->lower_y_dst);
     free(ptr->upper_y_src);
     free(ptr->upper_y_dst);
+
+    ptr->lower_x_src = ptr->lower_x_dst = NULL;
+    ptr->upper_x_src = ptr->upper_x_dst = NULL;
+    ptr->lower_y_src = ptr->lower_y_dst = NULL;
+    ptr->upper_y_src = ptr->upper_y_dst = NULL;
 
     return 0;
 }
@@ -328,11 +356,13 @@ int gf_rename(struct gf *gptr, const char *name)
 }
 
 /******************************************************************
-* Purpose: Recursively free a dynamically-allocated 2D grid function
-*     container and its entire child hierarchy. Calls
-*     ngfs_2d_deallocate to release variable data, then
-*     cleanup_2d_domain, then frees the struct pointer itself. Safe
-*     to call with NULL.
+* Purpose: Free a heap-allocated 2D grid function container, its
+*     entire descendant chain, and its MPI Cartesian communicator.
+*     Calls ngfs_2d_deallocate (which walks the child chain), unlinks
+*     gfs from its parent, frees the domain, and finally frees gfs
+*     itself.  Safe to call with NULL.  Must not be called on a
+*     stack-allocated container -- use ngfs_2d_deallocate +
+*     cleanup_2d_domain on those.
 * Input Variables:
 *     gfs: struct ngfs_2d*, root of the hierarchy to free; may be
 *         NULL
@@ -343,25 +373,29 @@ int gf_rename(struct gf *gptr, const char *name)
 *******************************************************************/
 int ngfs_2d_free(struct ngfs_2d *gfs)
 {
-    if (!gfs)
-        return 0;
-    if (gfs->child)
-        ngfs_2d_free(gfs->child);
-    if (gfs->parent)
+    if (!gfs) return 0;
+
+    /* Releases local resources and recursively frees the child chain. */
+    ngfs_2d_deallocate(gfs);
+
+    if (gfs->parent) {
         gfs->parent->child = NULL;
-    if (gfs->vars)
-        ngfs_2d_deallocate(gfs);
+        gfs->parent = NULL;
+    }
+
     cleanup_2d_domain(&gfs->domain);
     free(gfs);
     return 0;
 }
 
 /******************************************************************
-* Purpose: Recursively free a dynamically-allocated 3D grid function
-*     container and its entire child hierarchy. Calls
-*     ngfs_3d_deallocate to release variable data, then
-*     cleanup_3d_domain, then frees the struct pointer itself. Safe
-*     to call with NULL.
+* Purpose: Free a heap-allocated 3D grid function container, its
+*     entire descendant chain, and its MPI Cartesian communicator.
+*     Calls ngfs_3d_deallocate (which walks the child chain), unlinks
+*     gfs from its parent, frees the domain, and finally frees gfs
+*     itself.  Safe to call with NULL.  Must not be called on a
+*     stack-allocated container -- use ngfs_3d_deallocate +
+*     cleanup_3d_domain on those.
 * Input Variables:
 *     gfs: struct ngfs_3d*, root of the hierarchy to free; may be
 *         NULL
@@ -372,14 +406,16 @@ int ngfs_2d_free(struct ngfs_2d *gfs)
 *******************************************************************/
 int ngfs_3d_free(struct ngfs_3d *gfs)
 {
-    if (!gfs)
-        return 0;
-    if (gfs->child)
-        ngfs_3d_free(gfs->child);
-    if (gfs->parent)
+    if (!gfs) return 0;
+
+    /* Releases local resources and recursively frees the child chain. */
+    ngfs_3d_deallocate(gfs);
+
+    if (gfs->parent) {
         gfs->parent->child = NULL;
-    if (gfs->vars)
-        ngfs_3d_deallocate(gfs);
+        gfs->parent = NULL;
+    }
+
     cleanup_3d_domain(&gfs->domain);
     free(gfs);
     return 0;
