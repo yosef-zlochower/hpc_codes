@@ -1,0 +1,106 @@
+[grid]
+nx = 64           # global number of grid cells in x
+ny = 64           # global number of grid cells in y
+nz = 128          # global number of grid cells in z
+x0 = -1.0         # domain lower corner
+y0 = -1.0
+z0 = 0.0
+xn = 1.0          # domain upper corner
+yn = 1.0
+zn = 4.0
+# All three axes are non-periodic so the SBP-SAT penalty is applied on every
+# face. Set any of these to "true" to disable the penalty on that axis (useful
+# for the plane-wave convergence reference; see Develop_Penalty.md §1).
+periodic_x = false
+periodic_y = false
+periodic_z = false
+
+[solver]
+ghost_size       = 3        # ghost zone width (>= stencil half-width)
+cfl_factor       = 0.2      # dt = cfl_factor * min(dx,dy,dz); with 6-face SAT, corners stack three penalties so RK4's CFL limit is tighter than for interior-only schemes
+max_iterations   = 2049     # maximum number of time steps
+output_every     = 32       # HDF5 + constraint output frequency
+checkpoint_every = 512      # checkpoint frequency (0 = disabled)
+max_checkpoints  = 2        # number of checkpoint sets to keep per run
+recover          = false    # recover from checkpoint files
+use_dissipation  = false    # enable Kreiss-Oliger dissipation
+diss_coeff       = 0.1      # dissipation coefficient
+tau              = 1.0      # SBP-SAT penalty strength (>= 0.5 for stability)
+
+[physics]
+kappa_D = 0.1    # constraint-damping coefficient for div D
+kappa_B = 0.1    # constraint-damping coefficient for div B
+
+# ── [source] ──────────────────────────────────────────────────────────────────
+# The source group holds everything that drives the fields — boundary
+# injection on each physical face *and* initial data at t = 0 — because the
+# two come from the same analytic function evaluated at different (x,y,z,t).
+# `type` picks which sub-table below is consumed; the others are parsed but
+# unused, so switching sources is a one-line edit.
+#
+#   "plane_wave":        bump-enveloped plane wave with transverse polarisation.
+#                        Pair with periodic_x = periodic_y = true for the
+#                        formal SBP-SAT convergence test (non-dispersive
+#                        exact solution).
+#   "gaussian_beam":     paraxial collimated beam travelling in +z, injected
+#                        at the lower-z face. Use for the beam-through-lens
+#                        demo with all faces non-periodic (see
+#                        Develop_Penalty.md §6).
+#   "te_waveguide_mode": TE mode of a rectangular unit-cube waveguide,
+#                        propagating in +z with transverse standing-wave
+#                        numbers (l, m) and longitudinal mode n; dispersion
+#                        omega^2 = pi^2 (l^2 + m^2 + n^2). Exact vacuum
+#                        Maxwell solution. When l, m, n are even the analytic
+#                        is also periodic on the unit cube, so the same
+#                        reference serves the convergence test in both
+#                        periodic and fully-physical boundary configurations.
+[source]
+type = "gaussian_beam"
+
+[source.plane_wave]
+ax      = 1.0     # x-polarisation amplitude
+ay      = 1.0     # y-polarisation amplitude
+k       = 4.0     # wave number
+bump_a  = 0.0     # bump-envelope turn-on start
+bump_b  = 2.0     # bump-envelope turn-on end
+
+[source.gaussian_beam]
+w0        = 0.20  # beam waist radius (Lx/(2 w0) ~ 5 → tails at walls negligible)
+z_waist   = 2.0   # place the waist inside the lens
+k         = 15.0  # wave number (k * w0 = 3 → paraxial residual ~ 10%). Pair with nx,ny >= 64 to keep ~10 points per wavelength.
+amplitude = 1.0   # peak field amplitude
+# Smooth temporal turn-on: zero for t <= ramp_a, full amplitude for t >= ramp_b.
+# Filling the domain at t = 0 with the paraxial beam (which is not an exact
+# solution of the discrete Maxwell PDE) seeds an instability, so the ramp is
+# essential — lengthen it if you see growth during turn-on at high k*w0.
+ramp_a    = 0.0
+ramp_b    = 1.0
+
+[source.te_waveguide_mode]
+l = 2             # transverse mode number in x (>= 1)
+m = 2             # transverse mode number in y (>= 1)
+n = 2             # longitudinal mode number in z (>= 1; propagation direction)
+
+# ── [material] ────────────────────────────────────────────────────────────────
+# [material.background] carries the always-used uniform scalars. epsilon_type
+# chooses whether a spatially-varying profile is layered on top: "uniform"
+# uses the background everywhere, "elliptical" modulates epsilon with the
+# [material.elliptical] lens bump.
+[material]
+epsilon_type = "elliptical"   # "uniform" or "elliptical"
+
+[material.background]
+epsilon = 1.0                 # baseline permittivity (asymptote of the elliptical profile)
+mu      = 1.0                 # uniform permeability  (imu  = 1/mu)
+sigma   = 0.0                 # uniform conductivity
+
+# Elliptical lens profile, layered on top of the background when
+# epsilon_type = "elliptical":
+#   eps(x,z) = (max - epsilon) * exp(-s^2 * ((x-x0)^2/a^2 + (z-z0)^2/b^2))^2 + epsilon
+[material.elliptical]
+max = 4.0                     # peak permittivity at the lens centre
+x0  = 0.0                     # centre x
+z0  = 2.0                     # centre z
+s   = 2.0                     # steepness
+a   = 0.5                     # semi-axis x
+b   = 0.25                    # semi-axis z

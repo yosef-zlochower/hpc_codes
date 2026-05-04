@@ -1,0 +1,1919 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{url}
+
+\geometry{margin=1in}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black,
+            urlcolor=blue!50!black, citecolor=blue!50!black}
+
+\lstdefinestyle{shell}{
+    basicstyle=\ttfamily\footnotesize,
+    backgroundcolor=\color{black!4},
+    frame=single, framerule=0pt,
+    breaklines=true, columns=fullflexible,
+    keepspaces=true,
+    showstringspaces=false,
+    xleftmargin=0.5em, xrightmargin=0.5em,
+}
+\lstdefinestyle{cpp}{
+    style=shell,
+    language=C++,
+    keywordstyle=\color{blue!50!black},
+    commentstyle=\color{green!40!black},
+    stringstyle=\color{purple},
+}
+
+\newcommand{\vE}{\mathbf{E}}
+\newcommand{\vB}{\mathbf{B}}
+\newcommand{\vD}{\mathbf{D}}
+\newcommand{\vH}{\mathbf{H}}
+\newcommand{\vJ}{\mathbf{J}}
+\newcommand{\vx}{\mathbf{x}}
+\newcommand{\hx}{\hat{x}}
+\newcommand{\hy}{\hat{y}}
+\newcommand{\hz}{\hat{z}}
+\newcommand{\eps}{\varepsilon}
+
+\title{\textbf{\texttt{Maxwell\_Kokkos}}\\
+       Documentation for the Kokkos port of the SBP--SAT Maxwell solver}
+\author{HPC course --- SMS 751/2255}
+\date{April 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\bigskip
+
+\begin{abstract}
+\texttt{Maxwell\_Kokkos} is a three-dimensional finite-difference
+solver for Maxwell's equations in a linear (possibly inhomogeneous)
+dielectric, coupled to a hyperbolic constraint-damping system.  The
+spatial discretization uses fourth-order summation-by-parts (SBP-4-2)
+operators with one-sided closures at every physical face.  Boundary
+conditions are imposed weakly via Simultaneous Approximation Term
+(SAT) penalties on all six Cartesian faces.  The time integrator is
+classical fourth-order Runge--Kutta.  The code is the Kokkos port of
+the Week-11 \texttt{Maxwell\_Penalty} reference: the physics and the
+discretization are unchanged, but every compute kernel is expressed
+as a \texttt{Kokkos::parallel\_for} or \texttt{parallel\_reduce} so
+the same source builds for OpenMP on a CPU host and for CUDA on a
+single GPU.  This document covers the physics, the numerical scheme,
+the SBP-SAT penalty derivation, source models and their limitations,
+the Kokkos integration, build and run instructions, tests, validation
+status, and the appendix with explicit per-face SAT formulas.
+\end{abstract}
+
+\section{Overview}
+
+\texttt{Maxwell\_Kokkos} is a Kokkos re-implementation of
+\texttt{Maxwell\_Penalty} from Week 11.  The physics, the
+discretization, and the user-facing interface (TOML configuration,
+HDF5 output, MPI Cartesian decomposition) are unchanged from the
+parent code; the compute kernels have been ported to
+\texttt{Kokkos::parallel\_for} and \texttt{Kokkos::parallel\_reduce}
+so the same source builds for OpenMP on a CPU host and for CUDA on
+a single GPU.  Companion documents:
+
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \texttt{../Week11/Maxwell\_Penalty/CLAUDE.md} --- parent code
+        notes (TOML schema, source types, lens demo, convergence
+        rates, SBP--SAT sign convention warnings).
+  \item \texttt{../Week11/Maxwell\_Penalty/doc/documentation.tex}
+        --- the parent document this one is partially derived from.
+        Many of the physics, characteristic, and limitations
+        sections are imported verbatim from there.
+  \item \texttt{../Week11/Maxwell/Develop\_Penalty.md} --- continuum
+        derivation of the SBP--SAT penalty for the extended Maxwell
+        system.
+  \item \texttt{GPU\_Maxwell.md} --- the implementation plan that
+        produced this code.
+  \item \texttt{Report.md} --- focused report on the include and
+        build-option design as actually shipped.
+\end{itemize}
+
+The remainder of this document is organised as follows.
+Sections~\ref{sec:physics}--\ref{sec:material} cover the physics:
+the extended-Maxwell system, the spatial discretization, the
+SBP--SAT penalty, the available analytic sources, and the material
+model.  Section~\ref{sec:limitations} catalogues the limitations of
+characteristic-based absorbing boundaries and
+Section~\ref{sec:pml} sketches the Perfectly Matched Layer extension
+that would address them.
+Section~\ref{sec:kokkos-arch} is the new value-add of this port:
+how the Kokkos integration is laid out, the design choices that let
+the existing SymPy-generated SAT macros work unchanged, and the
+file map.
+Sections~\ref{sec:build}--\ref{sec:running} cover building and
+running the code, including the full TOML parameter schema and the
+two canonical configurations.
+Section~\ref{sec:tests} documents the test suite,
+Section~\ref{sec:convergence} the convergence study (the strongest
+correctness check), Section~\ref{sec:status} the overall validation
+status, and Section~\ref{sec:known} the toolchain pitfalls
+discovered when bringing the code up on an A100 host.
+Appendix~\ref{app:sat-formulas} gives the explicit per-face SAT
+formulas.
+
+\section{The continuum system}
+\label{sec:physics}
+
+The code evolves the electromagnetic field $(\vE, \vB)$ in a
+linear, possibly inhomogeneous, dielectric.  Let $\eps(\vx)$ be the
+permittivity, $\mu(\vx)$ the permeability, and $\sigma(\vx)$ the
+conductivity (Ohmic damping).  Define $\vD = \eps \vE$ and
+$\vH = \vB / \mu$.  In Gaussian units, Maxwell's equations are
+\begin{align}
+  \partial_t \vD &= \nabla \times \vH - 4\pi \vJ, \label{eq:ampere}\\
+  \partial_t \vB &= -\nabla \times \vE, \label{eq:faraday}\\
+  \nabla \cdot \vD &= 4\pi \rho, \label{eq:gauss-e}\\
+  \nabla \cdot \vB &= 0, \label{eq:gauss-b}
+\end{align}
+with Ohm's law $\vJ = \sigma \vE$.  Equations
+\eqref{eq:ampere}--\eqref{eq:faraday} are the time-evolution
+(\emph{hyperbolic}) equations; \eqref{eq:gauss-e}--\eqref{eq:gauss-b}
+are the divergence constraints, preserved by the time evolution in
+the continuum.
+
+Numerically this preservation is not automatic.  Round-off and
+truncation error in the discretized curl operators can seed small
+constraint violations that, in a naive scheme, grow without bound.
+The standard remedy --- following Munz et al.\ --- is to extend the
+system with two auxiliary scalar fields $\Psi_D, \Psi_B$ that act as
+Lagrange multipliers for the constraints:
+\begin{align}
+  \partial_t \vD - c^2 \nabla \Psi_D
+                 &= \nabla \times \vH - 4\pi \vJ, \\
+  \partial_t \vB - c^2 \nabla \Psi_B
+                 &= -\nabla \times \vE, \\
+  \partial_t \Psi_D &= \nabla \cdot \vD - 4\pi \rho - \kappa_D \Psi_D, \\
+  \partial_t \Psi_B &= \nabla \cdot \vB - \kappa_B \Psi_B.
+\end{align}
+At $\Psi_D = \Psi_B = 0$ the original Maxwell system is recovered.
+For $\kappa_{D,B} > 0$ the $\Psi$ fields satisfy damped wave
+equations whose source is the constraint violation: any residual
+violation radiates outward at speed $c$ and is exponentially damped
+on timescale $1/\kappa$.  This absorbs round-off and truncation
+noise, and absorbs the $O(1/(kw_0)^2)$ constraint residual of the
+paraxial beam source (\S\ref{sec:gaussian-beam}).
+
+The code evolves nine fields,
+$U = (D_x, D_y, D_z, B_x, B_y, B_z, \Psi_D, \Psi_B, \rho)^\top$,
+plus five auxiliaries $(1/\eps, 1/\mu, \sigma, c_D, c_B)$ where the
+last two are diagnostic constraint values.  The charge density
+$\rho$ is carried as an evolved variable for generality, driven by
+$\partial_t \rho + \nabla \cdot \vJ = 0$; for the simulations
+shipped with the code, $\rho$ and $\vJ$ are initially zero and
+remain zero up to round-off.  Slot ordering is fixed in the
+\texttt{evolved\_slot} and \texttt{auxilliary\_slot} enums in
+\texttt{maxwell\_eqs.hpp}; the C-version's discipline of ``one
+source of truth for variable order'' is preserved verbatim.
+
+The material parameters $\eps, \mu, \sigma$ are stored in inverse
+form $\mathtt{ieps} = 1/\eps$, $\mathtt{imu} = 1/\mu$,
+$\mathtt{sigma} = \sigma$ as auxiliary gridfunctions.  They may
+vary in space; the default beam-through-lens demo places an
+elliptical-contour permittivity bump (\S\ref{sec:material}).
+
+\subsection{The flux form}
+
+The spatial derivatives in the extended system can be written as a
+quasi-linear hyperbolic system
+\begin{equation}
+  \partial_t U + A_x \partial_x U + A_y \partial_y U + A_z \partial_z U
+  = S(U, \vx),
+  \label{eq:flux-form}
+\end{equation}
+where $S$ collects source terms (conductivity damping, constraint
+relaxation, material-gradient couplings) and the three flux matrices
+$A_x, A_y, A_z$ encode spatial propagation.  Their characteristic
+decomposition is what the SAT penalty needs; we return to it in
+\S\ref{sec:sat}.
+
+\section{Spatial discretization}
+\label{sec:spatial}
+
+\subsection{Grid, decomposition, and indexing}
+
+The domain is a rectangular parallelepiped
+$[x_0, x_n]\times[y_0, y_n]\times[z_0, z_n]$, discretized on a
+uniform Cartesian grid of global size $(N_x, N_y, N_z)$ with
+spacings $dx, dy, dz$.  The grid is distributed across MPI ranks
+via a Cartesian topology chosen automatically by greedy prime
+factorization.  Each rank owns a contiguous block surrounded by
+ghost zones of width $g_s$ (default 3).  For physical boundaries
+the ghost zones are absent and the rank stores real data at every
+index; for MPI-internal and periodic boundaries, the ghost zones
+are synchronised via non-blocking point-to-point communication
+between RK stages.
+
+The local index into a 3D field $f$ at grid point $(i, j, k)$ is
+$\mathtt{ijk} = i + j N_x + k N_x N_y$, with $i$ the fastest-varying
+index.  Strides are $d_i = 1$, $d_j = N_x$, $d_k = N_x N_y$.  Every
+finite-difference stencil takes a stride argument so it can operate
+along any axis.  The Kokkos port keeps this offset arithmetic
+identical: \texttt{Kokkos::View<double***, LayoutLeft>} of shape
+$(N_x, N_y, N_z)$ has the same flat-index offset, so the existing
+stencils and SAT macros work unchanged --- see
+\S\ref{sec:kokkos-arch}.
+
+\subsection{Summation-by-parts (SBP) operators}
+\label{sec:sbp-operators}
+
+The spatial derivatives are computed by summation-by-parts
+finite differences of order $(4,2)$ --- fourth-order in the
+interior, second-order one-sided closures at the first four rows
+on each boundary.  A $(4,2)$ SBP operator $D$ approximating
+$d/dx$ on a grid of $N$ points factorizes as
+\begin{equation}
+  D = H^{-1} Q, \qquad
+  Q + Q^\top = B = \mathrm{diag}(-1, 0, \ldots, 0, +1),
+\end{equation}
+where $H$ is a positive-definite diagonal weight matrix (the
+``norm'') and $Q$ is almost antisymmetric, the asymmetry captured
+entirely by the boundary term $B$.  In the $(4,2)$ case
+\begin{equation}
+  H = h \cdot \mathrm{diag}(17/48,\, 59/48,\, 43/48,\, 49/48,\,
+                            1, 1, \ldots).
+\end{equation}
+The key stability-enabling identity is
+\begin{equation}
+  \langle u, D v \rangle_H + \langle Du, v \rangle_H
+    = u_N v_N - u_0 v_0,
+\end{equation}
+where
+$\langle u, v \rangle_H = \sum_i H_{ii} u_i v_i$.  This is the
+discrete analogue of integration by parts on a finite interval ---
+the boundary terms appear exactly, without truncation error, and
+this identity is what lets us prove a discrete energy estimate.
+
+The interior stencil (rows $i = 4, \ldots, N-5$) is the standard
+fourth-order centered difference
+\[
+  (D u)_i = \frac{u_{i-2} - 8 u_{i-1} + 8 u_{i+1} - u_{i+2}}{12 h}
+  + O(h^4).
+\]
+The four near-boundary rows use one-sided Strand (1994) closures;
+at the lower boundary,
+\begin{align*}
+  (D u)_0 &= \frac{-24 u_0 + 59 u_1 - 8 u_2 - 3 u_3}{17 h}, \\
+  (D u)_1 &= \frac{-u_0 + u_2}{2 h}, \\
+  (D u)_2 &= \frac{ 4 u_0 - 59 u_1 + 59 u_3 - 4 u_4}{86 h}, \\
+  (D u)_3 &= \frac{ 3 u_0 - 59 u_2 + 64 u_4 - 8 u_5}{98 h},
+\end{align*}
+and symmetric closures at the upper boundary.  These are
+implemented as \texttt{SBP42\_L0}--\texttt{SBP42\_L3} and the
+upper-boundary counterparts \texttt{SBP42\_RN}--\texttt{SBP42\_RNm3}
+in \texttt{derivatives.hpp}.  In the Kokkos port each stencil
+function is annotated \texttt{KOKKOS\_INLINE\_FUNCTION} so it can
+be called from device kernels.
+
+\subsection{Optional Kreiss--Oliger dissipation}
+
+When \texttt{[solver].use\_dissipation = true} the RHS is augmented
+by a 5th-order Kreiss--Oliger dissipation operator
+\[
+  \dot u_i \mathrel{+}=
+    -\frac{\sigma_{\text{KO}}}{\Delta x}
+    \cdot \frac{1}{64}\bigl(
+       u_{i-3} - 6 u_{i-2} + 15 u_{i-1}
+       - 20 u_i
+       + 15 u_{i+1} - 6 u_{i+2} + u_{i+3}\bigr),
+\]
+applied separately along $x$, $y$, $z$.  The operator is skipped
+on the outer three rows of each axis.  Useful for damping
+grid-scale noise from oblique partial reflections; see
+\S\ref{sec:oblique-reflection}.
+
+\section{Time integration}
+\label{sec:time}
+
+Time integration is classical explicit fourth-order Runge--Kutta:
+\begin{align*}
+  k_1 &= f(t_n,\, u_n),                  & u_n^{(1)} &= u_n + \tfrac{\Delta t}{2} k_1,\\
+  k_2 &= f(t_n + \tfrac{\Delta t}{2},\, u_n^{(1)}), &
+                     u_n^{(2)} &= u_n + \tfrac{\Delta t}{2} k_2,\\
+  k_3 &= f(t_n + \tfrac{\Delta t}{2},\, u_n^{(2)}), &
+                     u_n^{(3)} &= u_n + \Delta t\, k_3,\\
+  k_4 &= f(t_n + \Delta t,\, u_n^{(3)}), &
+                     u_{n+1} &= u_n + \tfrac{\Delta t}{6}\,
+                        (k_1 + 2 k_2 + 2 k_3 + k_4).
+\end{align*}
+The timestep is chosen by the CFL condition
+\(\Delta t = c \cdot \min(\Delta x, \Delta y, \Delta z)\)
+with the safety factor $c$ taken from the TOML
+(\texttt{[solver].cfl\_factor}).  For the pure SBP interior (no
+SAT), stability permits $c \lesssim 1$.  With SAT penalties on all
+six faces, the effective spectral radius increases near corners
+where multiple penalties stack, and the usable CFL drops to
+$c \approx 0.2$ in practice (\S\ref{sec:stability-tau}).
+
+In the Kokkos port the C version's pointer-rebinding trick (where
+each \texttt{vars[v]->dot} pointer was reseated between RK stages
+to alias \texttt{K1..K4}) is replaced by an explicit integer
+\texttt{kidx} parameter to the time-derivative function.
+\texttt{DECLARE\_EVOLVED\_VARS} uses \texttt{kidx} to pick the
+correct \texttt{K[kidx].data()} pointer.  This keeps the kernel
+body identical to the C version while removing a non-obvious
+dataflow.
+
+\section{Boundary conditions: the SBP-SAT penalty method}
+\label{sec:sat}
+
+\subsection{Why weak imposition}
+
+The naïve approach to boundary conditions --- ``overwrite the
+evolution at boundary nodes with the prescribed boundary value''
+--- is called \emph{strong imposition}.  It is simple and often
+works, but it breaks the SBP energy estimate: a boundary row whose
+equation is replaced loses the clean integration-by-parts
+structure, and stability must be argued separately, usually by
+numerical experiment.
+
+The Simultaneous Approximation Term (SAT) method imposes boundary
+conditions \emph{weakly}, as an additive penalty.  The PDE is
+retained at every row, including the boundary row, and a correction
+is \emph{added} that pulls the solution toward the prescribed
+value.  The SAT term is tuned so the full semi-discrete system
+admits a discrete energy estimate: summing the equations against
+$U^\top H$ and using the SBP identity produces boundary terms that
+are exactly cancelled by the SAT penalty.  This gives provable
+stability for any $\tau \geq 1/2$
+(\S\ref{sec:stability-tau}), independent of the particular PDE
+coefficients or grid spacing.
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Property                       & Strong imposition            & SBP-SAT (weak)      \\
+\midrule
+Boundary equation              & Replaced entirely            & Interior RHS + penalty \\
+Energy estimate                & No formal proof              & Yes, provable for $\tau \geq 1/2$ \\
+Stability w/ non-uniform $\eps, \mu$ & No guarantee           & Provable \\
+Convergence order              & Same as interior closures    & Same as interior closures \\
+Penalty scaling                & N/A                          & $\tau \cdot H^{-1}_{00}/h$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both methods give the same formal convergence order --- the
+boundary truncation error is set by the SBP one-sided closure, not
+by how the boundary condition is imposed.  The pedagogical reason
+to prefer SBP-SAT is the discrete energy estimate, which extends
+to variable coefficients, multi-dimensional grids, and
+characteristic couplings.
+
+\subsection{Characteristic decomposition}
+\label{sec:characteristics}
+
+The penalty acts on the \emph{incoming} characteristic at each
+face.  For a hyperbolic system $\partial_t U + A \partial_x U = 0$
+with flux matrix $A$, diagonalize
+\[
+  A = V \Lambda V^{-1},
+  \qquad \Lambda = \mathrm{diag}(\lambda_1, \ldots, \lambda_n),
+\]
+and split into positive and negative eigenvalue parts:
+\[
+  A^+ = V \Lambda^+ V^{-1}, \quad
+  A^- = V \Lambda^- V^{-1}, \quad
+  \Lambda^\pm = \mathrm{diag}(\max(\pm \lambda_i, 0)).
+\]
+The characteristic variables $W = V^{-1} U$ satisfy
+$(\partial_t + \lambda_i \partial_x) W_i = 0$; modes with
+$\lambda_i > 0$ propagate in $+x$ (incoming at the lower face),
+modes with $\lambda_i < 0$ propagate in $-x$ (incoming at the
+upper face).
+
+At the lower-$x$ face, we prescribe the incoming characteristics
+(the $+\lambda$ modes); the $-\lambda$ modes are outflow and are
+determined by the interior dynamics.  At the upper-$x$ face the
+roles are reversed.
+
+\subsection{The penalty form}
+
+At the lower-$x$ boundary (grid index $i = 0$), the SAT correction
+is
+\begin{equation}
+  \dot U_0 \;\mathrel{-}=\;
+   \tau \cdot \frac{(H^{-1})_{00}}{h} \cdot A^+ \cdot (U_0 - g),
+  \label{eq:sat-lower}
+\end{equation}
+where $g$ is the prescribed incoming state and $\tau \geq 1/2$ is
+the penalty strength.  The code uses $\tau = 1$ by default;
+$(H^{-1})_{00} = 48/17$ for the $(4,2)$ SBP norm.  The stencil
+operates only on the single boundary row --- rows
+$i = 1, 2, 3$ receive the SBP one-sided derivative
+(\S\ref{sec:sbp-operators}) but \emph{no} additional SAT term;
+they contribute to the energy argument through the norm integral.
+The analogous correction at the upper boundary uses $A^-$ (or
+equivalently the positive-definite projection $|A^-|$) and the
+incoming data for that face:
+\begin{equation}
+  \dot U_{N-1} \;\mathrel{-}=\;
+   \tau \cdot \frac{(H^{-1})_{N-1,N-1}}{h}
+   \cdot |A^-| \cdot (U_{N-1} - g).
+  \label{eq:sat-upper}
+\end{equation}
+By symmetry $(H^{-1})_{N-1,N-1} = (H^{-1})_{00} = 48/17$.
+
+\subsection{Application to Maxwell's equations}
+
+For the extended Maxwell system, the $z$-axis flux matrix
+decomposes into four independent $2\times 2$ blocks plus one
+trivial $1\times 1$ block:
+
+\begin{center}
+\small
+\begin{tabular}{llll}
+\toprule
+Block        & Variables & Eigenvalues & Incoming char.\ at lower $z$ ($w^+$) \\
+\midrule
+EM-1         & $(B_x, D_y)$     & $\pm c$ & $B_x - PP \cdot D_y$ \\
+EM-2         & $(B_y, D_x)$     & $\pm c$ & $B_y + PP \cdot D_x$ \\
+Div-$B$      & $(B_z, \Psi_B)$  & $\pm 1$ & $B_z - \Psi_B$ \\
+Div-$D$      & $(D_z, \Psi_D)$  & $\pm 1$ & $D_z - \Psi_D$ \\
+Charge       & $\rho$           & $0$     & (none) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Here $c = 1/\sqrt{\eps\mu}$ is the local light speed
+($\sqrt{\mathtt{ieps}\cdot\mathtt{imu}}$ in the code's
+normalisation) and $PP = \sqrt{\eps/\mu}^{-1}
+= \sqrt{\mathtt{ieps}/\mathtt{imu}}$ is the impedance ratio.  The
+divergence blocks have eigenvalues $\pm 1$ because constraint
+violations propagate at the normalised speed set by the extended
+system, independent of material.  The $w^+$ column lists, for
+each block, the left-eigenvector combination that is the incoming
+characteristic at the lower-$z$ face; the upper-$z$ face injects
+the opposite combination ($w^-$) with the signs of the
+cross-coupling terms reversed.
+
+For the EM-1 block $(B_x, D_y)$, the flux matrix is
+\[
+  A_z^{(\mathrm{EM1})}
+  = \begin{pmatrix} 0 & -\mathtt{ieps} \\
+                    -\mathtt{imu} & 0 \end{pmatrix}.
+\]
+The right eigenvector for $\lambda = +c$ is
+$v^+ = (1, -1/PP)^\top$; the left eigenvector
+($L^+ A = c L^+$) is $L^+ = (1, -PP)^\top$; the positive
+projection is
+\[
+  A^+ = \frac{c}{L^+ \cdot v^+}\, v^+ (L^+)^\top
+      = \frac{c}{2}
+        \begin{pmatrix} 1 & -PP \\ -1/PP & 1 \end{pmatrix}.
+\]
+Applying to the deviation
+$\delta U = (B_x - g_{B_x}, D_y - g_{D_y})$:
+\begin{align*}
+  (A^+ \delta U)_{B_x}
+    &= \tfrac{c}{2}(\delta B_x - PP \cdot \delta D_y), \\
+  (A^+ \delta U)_{D_y}
+    &= \tfrac{c}{2}(-\delta B_x / PP + \delta D_y).
+\end{align*}
+The incoming characteristic for this block is therefore
+$w^+ = L^+ \cdot U = B_x - PP \cdot D_y$.
+
+\paragraph{Sanity check on a known solution.}
+For a $y$-polarised plane wave travelling in $+z$ (incoming at the
+lower-$z$ boundary), the fields satisfy
+$D_y = \psi$, $B_x = -\psi$ (the sign makes $\vE \times \vB$ point
+in $+\hz$), so
+\[
+  w^+ = -\psi - PP\cdot\psi = -(1+PP)\psi \neq 0
+\]
+as expected for an incoming mode.  A sign error that flipped any
+coupling term ($+PP$ instead of $-PP$, say) would give $w^+ = 0$
+on this same physical solution, and the SAT would silently fail to
+inject the wave.  The hand-written sign convention in
+\texttt{Maxwell/src/PenaltyImplementation.md} contains errors of
+exactly this form; the SymPy-emitted macros in
+\texttt{simple\_maxwell.h} are the authoritative version, derived
+from scratch by SymPy diagonalization of $M_a$ and verified
+against the traveling-wave check above.
+
+The implementation lives in \texttt{simple\_maxwell.h} as six
+preprocessor macros: \texttt{APPLY\_SAT\_LOWER\_\{X,Y,Z\}} and
+\texttt{APPLY\_SAT\_UPPER\_\{X,Y,Z\}}.  Only the lower-$z$ face
+has nonzero $g$ in the plane-wave and Gaussian-beam configurations
+(the incoming source field, \S\ref{sec:sources}); the other five
+faces use $g = 0$, which corresponds to a perfectly absorbing
+boundary for waves leaving normally.  See
+\S\ref{sec:oblique-reflection} for the angular caveat.
+
+\subsection{Edges and corners: additivity}
+
+At an edge (two physical faces meet) and at a corner (three faces
+meet), the SAT penalties are \emph{additive}: each face
+contributes its own penalty term independently.  No cross-term or
+corner-specific correction is needed.  This additivity is a direct
+consequence of the tensor-product structure: the 3D discrete
+energy norm $H = H_x \otimes H_y \otimes H_z$ decomposes the
+boundary contributions into independent surface integrals over
+each face, each cancelled by its own SAT term.
+
+Concretely, at the corner $(i,j,k) = (0,0,0)$ with all three axes
+physical, the RHS receives
+\begin{equation}
+  \dot U_{0,0,0} \;\mathrel{-}=\; \tau \left[
+    \frac{H^{-1}_0}{dx} A_x^+ \delta U
+  + \frac{H^{-1}_0}{dy} A_y^+ \delta U
+  + \frac{H^{-1}_0}{dz} A_z^+ \delta U
+  \right],
+  \label{eq:corner-sat}
+\end{equation}
+where the three projections act on the same state $\delta U$ but
+with axis-specific flux matrices.  This is the only corner-aware
+term in the code --- the SBP derivatives at the corner use
+one-sided closures in each direction independently, with no other
+correction.
+
+\subsection{Stability, $\tau$, and CFL at corners}
+\label{sec:stability-tau}
+
+The standard SBP-SAT stability theorem (Svärd \& Nordström)
+requires $\tau \geq 1/2$ for a single-face penalty on a scalar
+hyperbolic equation.  For a system with $n$ characteristic speeds
+on a tensor-product multidimensional grid, the same bound applies
+per face.  The code uses $\tau = 1$ as a comfortable margin.
+
+At corners, three SAT terms with per-face scaling
+$\tau (H^{-1}_0)/h$ stack additively on the same boundary row.
+The effective spectral radius of the discrete operator grows at
+the corner, and the usable CFL number drops.  Empirically, the
+six-face-physical scheme is stable at $\mathrm{cfl} \approx 0.2$
+with classical RK4 --- tighter than $\mathrm{cfl} \approx 0.5$
+safe for an interior-only (or two-face) scheme.  Raising $\tau$
+beyond 1 tightens the CFL further; reducing $\tau$ toward $1/2$
+relaxes it at the cost of stability margin.
+
+\section{Source models}
+\label{sec:sources}
+
+The lower-$z$ face (or, for the convergence-test source, every
+physical face) has nonzero boundary data $g$ corresponding to a
+specified incoming electromagnetic field.  Three sources are
+implemented:
+
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \texttt{plane\_wave}: a bump-enveloped plane wave
+        travelling in $+\hz$ (\S\ref{sec:plane-wave}).  Pair with
+        periodic $x, y$ for the formal convergence reference
+        (Option B).
+  \item \texttt{gaussian\_beam}: a paraxial collimated beam
+        injected at the lower-$z$ face (\S\ref{sec:gaussian-beam}).
+        Used with all faces non-periodic for the headline
+        beam-through-lens demonstration (Option A).
+  \item \texttt{te\_waveguide\_mode}: an exact vacuum Maxwell TE
+        mode of a rectangular unit-cube waveguide
+        (\S\ref{sec:te-mode}), used as SAT data on every physical
+        face for the four-configuration convergence study
+        (\S\ref{sec:convergence}).
+\end{itemize}
+Selection is via \texttt{[source].type} in the TOML.  Per-source
+parameters live in dedicated sub-tables; the driver parses all
+three so switching sources is a one-line edit.
+
+\subsection{Plane wave source}
+\label{sec:plane-wave}
+
+A transverse electromagnetic wave travelling in $+\hz$, linearly
+polarised as
+$\vE = (E_0^x \hx + E_0^y \hy) f(t-z) \cos(k(z-t))$, modulated by
+a $C^2$ smooth bump envelope $f$ that turns on over an interval
+$[a, b]$.  This satisfies the vacuum Maxwell equations exactly
+(independent of $k$), so in a configuration with $x, y$ periodic
+and $z$ non-periodic this is an \emph{exact} reference for formal
+convergence testing of the SBP-SAT scheme.
+
+The plane wave has no transverse structure: the field at $x = 0$
+and $x = L_x$ is identical.  Combining this source with
+non-periodic $x, y$ would put a full-amplitude wavefield at the
+transverse walls, where the $g = 0$ SAT pulls toward zero and
+excites a numerical instability.  The plane wave is not usable
+with six-face SAT (\S\ref{sec:limitations}).
+
+\subsection{Paraxial Gaussian beam}
+\label{sec:gaussian-beam}
+
+Models a collimated laser beam entering at the lower-$z$ face,
+optionally converging toward a waist at $z = z_w$.  The paraxial
+scalar amplitude is
+\begin{equation}
+  \psi(\vx, t) = E_0 \cdot \frac{w_0}{w(z)}
+    \exp\!\left(-\frac{r^2}{w(z)^2}\right)
+    \cos\!\left(kz - \omega t + \frac{k r^2}{2 R(z)} - \varphi_G(z)\right),
+  \label{eq:gauss-amp}
+\end{equation}
+with $r^2 = x^2 + y^2$, $\omega = kc$, and
+\begin{align*}
+  z_R &= \tfrac{1}{2} k w_0^2
+            \quad\text{(Rayleigh range)} \\
+  w(z)       &= w_0 \sqrt{1 + ((z-z_w)/z_R)^2} \\
+  1/R(z)     &= (z-z_w) / ((z-z_w)^2 + z_R^2) \\
+  \varphi_G(z)& = \arctan((z-z_w)/z_R)
+            \quad\text{(Gouy phase)}.
+\end{align*}
+The implementation in \texttt{analytic\_solutions.hpp} uses an
+electric Hertz-vector construction
+$\boldsymbol{\Pi} = \hat{x}\,\mathrm{Re}[\Phi_c]$ with
+$\Phi_c = (E_0/k^2)\, A(r, z)\, e^{i\gamma}$ and sets
+$\vD = \nabla\times\nabla\times\boldsymbol{\Pi}$,
+$\vB = \partial_t(\nabla\times\boldsymbol{\Pi})$.  This makes
+$\nabla\cdot\vD = \nabla\cdot\vB = 0$ \emph{exactly} by
+$\nabla\cdot(\nabla\times\cdot) \equiv 0$, so the constraint-damping
+fields stay at numerical-noise level even though $\Phi$ only solves
+the wave equation to $O((kw_0)^{-2})$.
+
+\paragraph{Convergence vs.\ divergence.}
+The sign of $1/R(z)$ determines the wavefront curvature.  For
+$z < z_w$, $R < 0$: the wavefronts are concave toward the beam
+axis and the beam converges.  For $z > z_w$, $R > 0$ and the beam
+diverges.  Placing $z_w$ in the middle of the domain produces a
+beam that converges through the first half, reaches minimum spot
+at the middle, then diverges.
+
+\paragraph{Collimation.}
+A beam is ``nearly collimated'' (laser-like) over a propagation
+distance $L$ when $z_R \gg L$.  The spot size varies as
+$w(L)/w_0 = \sqrt{1 + (L/z_R)^2}$, so $z_R = 10 L$ gives 0.5\,\%
+broadening, and $z_R = 3 L$ gives 5\,\%.  Fixed domain $L$ then
+requires large $k w_0^2$, which costs transverse resolution
+(\S\ref{sec:limitations}).
+
+\paragraph{Paraxial residual.}
+\eqref{eq:gauss-amp} satisfies the full Maxwell equations only to
+$O(1/(kw_0)^2)$.  The residual manifests as small but nonzero
+$\nabla\cdot\vE$ and $\nabla\cdot\vB$ when the beam is injected;
+the constraint-damping fields $\Psi_D, \Psi_B$ absorb and radiate
+it on timescale $1/\kappa_{D,B}$.  $kw_0 \gtrsim 5$ keeps the
+residual below $4\%$, well within the constraint-damping system's
+domain of validity.
+
+\subsection{Smooth turn-on in time}
+
+For \texttt{plane\_wave}, the envelope $f(t-z)$ vanishes at $t=0$
+for all $z\geq 0$, so the initial state is identically zero and
+the wave enters gradually through the SAT boundary.
+
+For \texttt{gaussian\_beam}, the analytic formula
+\eqref{eq:gauss-amp} does not vanish at $t = 0$.  Filling the
+interior with it would seed the domain with a state that is only
+a paraxial approximation; empirically this excites a numerical
+instability that grows exponentially regardless of CFL.  To avoid
+it, the beam source is multiplied by a smooth $C^2$ turn-on
+$f(t; t_a, t_b)$ that rises from 0 at $t \leq t_a$ to 1 at
+$t \geq t_b$.  The interval is exposed as
+\texttt{[source.gaussian\_beam].ramp\_a}/\texttt{ramp\_b};
+default $[0,1]$.  The initial state is therefore identically
+zero, and the beam grows in through the boundary SAT as the
+envelope rises.  Lengthening the ramp reduces paraxial-residual
+excitation during turn-on at the cost of delaying the onset of
+interesting physics.
+
+The \texttt{te\_waveguide\_mode} source is an exact solution and
+needs no turn-on: it is non-zero at $t = 0$ and the initial state
+on the full grid is consistent with the boundary data at every
+face.  The convergence test relies on this consistency
+(\S\ref{sec:convergence}).
+
+\subsection{TE waveguide mode}
+\label{sec:te-mode}
+
+The TE($l, m, n$) mode of a unit-cube rectangular waveguide
+propagating in $+z$, with dispersion
+$\omega^2 = \pi^2(l^2 + m^2 + n^2)$:
+\begin{align*}
+  D_x &= \frac{\omega}{l\pi}\, \sin(m\pi y)\, \cos(l\pi x)\, \cos(n\pi z - \omega t), \\
+  D_y &= -\frac{\omega}{m\pi}\, \sin(l\pi x)\, \cos(m\pi y)\, \cos(n\pi z - \omega t), \\
+  D_z &= 0, \\
+  B_x &= \frac{n}{m}\, \sin(l\pi x)\, \cos(m\pi y)\, \cos(n\pi z - \omega t), \\
+  B_y &= \frac{n}{l}\, \sin(m\pi y)\, \cos(l\pi x)\, \cos(n\pi z - \omega t), \\
+  B_z &= -\frac{l^2+m^2}{lm}\, \sin(n\pi z - \omega t)\, \cos(l\pi x)\, \cos(m\pi y),
+\end{align*}
+with $\Psi_D = \Psi_B = \rho = 0$.  The mode numbers
+$(l, m, n)$ must each be $\geq 1$ (the parameter parser enforces
+this; division by $l$, $m$ in the formula above also requires it).
+For even $(l, m, n)$ the solution is also periodic on the unit
+cube, so the same reference works for both periodic and
+fully-physical boundary configurations in the convergence study.
+
+\section{Material model}
+\label{sec:material}
+
+\paragraph{Background.}
+A uniform $(\eps, \mu, \sigma)$ from
+\texttt{[material.background]}.  The auxiliary fields
+$1/\eps, 1/\mu, \sigma$ live in slots
+\texttt{IEPS\_SLOT, IMU\_SLOT, SIGMA\_SLOT} and are constant in
+time.
+
+\paragraph{Optional elliptical lens.}
+If \texttt{[material].epsilon\_type = "elliptical"} an
+elliptical-Gaussian permittivity profile is layered on top:
+\begin{equation}
+  \eps(x, z) = (\eps_{\max} - \eps_{\text{bg}})\,
+    \exp\!\left[-s^2 \left(\frac{(x-x_0)^2}{a^2}
+                          + \frac{(z-z_0)^2}{b^2}\right)^2\right]
+    + \eps_{\text{bg}},
+  \label{eq:lens}
+\end{equation}
+with $\eps_{\text{bg}}$ the \texttt{epsilon} from
+\texttt{[material.background]}.  Set once at
+\texttt{set\_initial\_data} time and held constant thereafter.
+Used in the Option A demo.
+
+\section{Limitations}
+\label{sec:limitations}
+
+\subsection{Transverse-face reflections}
+
+The $g = 0$ SAT on the $\pm x, \pm y$ faces is correct only
+insofar as the physical solution has negligible amplitude there.
+For a Gaussian beam with $w_0 \ll L_x, L_y$ the wall tail decays
+as $\exp(-(L_{x,y}/2 w)^2)$ and reflections sit below roundoff for
+$L_{x,y} \gtrsim 10\, w_0$.  For a plane wave (full amplitude at
+the walls) this boundary treatment is unsuitable --- spurious
+reflection cascades into instability.
+
+\subsection{Paraxial approximation}
+
+The Gaussian-beam source is a paraxial approximation to Maxwell's
+equations.  The residual constraint violation is $O(1/(kw_0)^2)$
+and is absorbed by the constraint-damping fields.  This is
+acceptable as a physics source but means the beam is not an exact
+solution; the $L^2$ error of the numerical evolution against the
+paraxial reference is therefore \emph{not} a convergence metric.
+Use the plane-wave (\S\ref{sec:plane-wave}) or
+\texttt{te\_waveguide\_mode} (\S\ref{sec:te-mode}) source for
+convergence testing.
+
+\subsection{Resolution / containment / paraxial trade-off}
+
+Three constraints on the beam parameters:
+\begin{itemize}[itemsep=1pt,topsep=2pt]
+  \item Grid resolution: $k\cdot dx \lesssim 0.6$, i.e., roughly
+        10 points per wavelength.
+  \item Paraxial validity: $k w_0 \gtrsim 5$ (residual $\leq 4\%$).
+  \item Transverse containment: $L_x/w_0 \gtrsim 5$
+        (preferably $\geq 10$).
+\end{itemize}
+For a laser-like (collimated) beam, the Rayleigh range
+$z_R = k w_0^2 / 2$ must additionally be large compared with the
+propagation length $L_z$.  All four together favour large $k$ and
+large $w_0$, raising the required $N_x$ steeply.
+
+\subsection{CFL at corners}
+
+With all six faces treated by SAT, the scheme is stable at
+$\mathrm{cfl} \approx 0.2$ with classical RK4, tighter than the
+$\mathrm{cfl} \approx 0.5$ safe for the periodic-$xy$
+interior-only scheme (\S\ref{sec:stability-tau}).  Exponentially
+growing $L^2$ error usually means the CFL is too large, not a
+physics failure.
+
+\subsection{Plane wave with six-face SAT}
+
+The plane-wave source combined with all six SAT faces produces a
+documented numerical instability: the transverse walls see
+full-amplitude tangential field, and the $g = 0$ SAT attempts to
+force it to zero.  This is not a bug; it is the documented
+failure mode of the SAT boundary for a physical configuration
+whose field is not transversely contained.  Use periodic $x, y$
+for plane-wave runs.
+
+\subsection{Angular (oblique) reflections from every SAT face}
+\label{sec:oblique-reflection}
+
+The most important limitation of the current boundary treatment is
+shared by all characteristic-based absorbing boundaries: the SAT
+penalty is exact for waves moving \emph{normal} to the boundary,
+but only partial for waves moving at oblique angles.  This
+affects every face, not just the transverse ones:
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \textbf{Lower-$z$ face}: the SAT's $+c$ projection
+        correctly leaves a head-on outgoing wave (the $-c$ mode)
+        untouched.  A wave at angle $\theta$ to the $z$-axis has
+        its energy split between the $+c$ and $-c$
+        $z$-characteristics in proportions depending on
+        $\sin\theta$; the SAT treats the $+c$ part as incoming and
+        pulls it toward the prescribed beam data, producing a
+        spurious reflection whose amplitude grows with $\theta$.
+  \item \textbf{Upper-$z$ face}: same mechanism, with $g = 0$.  A
+        wave refracted by the lens and travelling mostly in $+z$
+        but at an angle is partially reflected back into the
+        domain.
+  \item \textbf{$\pm x, \pm y$ faces}: same mechanism again.  The
+        beam reaches these walls only as a Gaussian tail and as
+        lens-scattered components, so the contribution is small
+        for well-contained beams but non-negligible whenever the
+        lens refracts energy sideways.
+\end{itemize}
+
+\paragraph{Concrete failure mode: beam on a high-$\eps$ lens.}
+A dielectric step of permittivity $\eps_{\max}$ reflects a Fresnel
+fraction $R = ((\sqrt{\eps_{\max}} - 1)/(\sqrt{\eps_{\max}} + 1))^2$
+of incident intensity at normal incidence.  For $\eps_{\max} = 4$,
+$R \approx 0.11$ in intensity, $\sim 1/3$ in amplitude --- a
+substantial portion of the beam bounces off the lens and travels
+back toward $-z$.  The pure-$-z$ component exits cleanly; angular
+side-lobes generated by the elliptical edge of the lens partially
+reflect off the SAT faces and re-enter.  After a few bounces the
+domain fills with low-amplitude oblique modes that interfere with
+the incident beam every $\lambda/2 = \pi/k$.
+
+\paragraph{Mitigations within the current code.}
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item Shorten the simulation time so no wave completes a round
+        trip.
+  \item Weaken the lens ($\eps_{\max}$ closer to 1).
+  \item Widen the domain so the transverse walls stay far from
+        the beam after lens refraction.
+  \item Enable Kreiss-Oliger dissipation
+        (\texttt{use\_dissipation = true},
+        \texttt{diss\_coeff} $\sim 0.02$--$0.1$) to damp grid-scale
+        noise from partial reflections.  This does not remove the
+        angular reflections themselves but suppresses their
+        high-frequency signature.
+\end{itemize}
+None of these is a true fix; for angle-independent absorption the
+code would need a Perfectly Matched Layer (\S\ref{sec:pml}).
+
+\section{Perfectly Matched Layers: a future extension}
+\label{sec:pml}
+
+A Perfectly Matched Layer (PML) is a finite-thickness absorbing
+buffer surrounding the physical domain, designed to absorb
+outgoing waves \emph{at any angle and any frequency} with zero
+reflection at the interface (in the continuum).  PML is the
+standard tool in production electromagnetic codes for open-domain
+problems.  \texttt{Maxwell\_Kokkos} does \emph{not} include a PML;
+this section sketches what one would add.
+
+\subsection{The mathematical mechanism: complex coordinate stretching}
+
+For Maxwell in, say, an $x$-face PML, formally replace
+$x$-derivatives by stretched derivatives
+\begin{equation}
+  \frac{\partial}{\partial x} \;\longrightarrow\;
+  \frac{1}{s_x(x)} \frac{\partial}{\partial x},
+  \qquad
+  s_x(x) = 1 + \frac{\sigma_x(x)}{i\omega},
+  \label{eq:pml-stretch}
+\end{equation}
+with $\sigma_x(x) \geq 0$ the PML damping profile, zero in the
+physical domain and ramping up through the PML.  Substituting a
+plane wave $e^{i(kx - \omega t)}$ in the PML region gives
+\[
+  e^{i(kx - \omega t)}\,
+  \exp\!\left(-\int_{x_0}^x \frac{\sigma_x(x')}{c}\, dx'\right),
+\]
+the same wave with an exponential envelope.  Crucially, the
+wavenumber $k$ and phase velocity are unchanged, so the wave does
+not refract at the PML interface --- the match is perfect for
+\emph{all} angles and \emph{all} frequencies.
+
+\subsection{From frequency domain to time domain}
+
+The complex factor $1/s_x$ is trivial in frequency but requires
+care in time: dividing by $(i\omega + \sigma_x)$ is a convolution
+with an exponential kernel.  Two standard implementations:
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \textbf{Bérenger split-field PML (1994)}: each field
+        component is split into pieces labelled by the contributing
+        derivative; each piece evolves under its own damping ODE.
+        Simple but doubles the field count in the PML.
+  \item \textbf{Convolutional PML / CPML (Roden \& Gedney 2000)}:
+        same complex stretch, but the convolution is implemented
+        through one auxiliary field per stretched derivative,
+        evolved by a first-order ODE.  Far fewer extra fields,
+        more robust at grazing incidence, gracefully handles
+        inhomogeneous media (like our lens).  CPML is the modern
+        standard.
+\end{itemize}
+In CPML, each stretched derivative $(1/s_x)\partial_x E$ is
+replaced by $\partial_x E + \Psi^x$ where the auxiliary $\Psi^x$
+evolves as
+\[
+  \frac{d\Psi^x}{dt} = -\alpha_x \Psi^x - \sigma_x\, \partial_x E.
+\]
+Outside the PML, $\sigma_x = \alpha_x = 0$ and $\Psi^x \equiv 0$.
+
+\subsection{The damping profile and what a PML would add}
+
+$\sigma(x)$ starts at zero at the interface and rises smoothly to
+$\sigma_{\max}$ at the outer face:
+\(
+  \sigma(x) = \sigma_{\max}\,(\xi/L_{\text{PML}})^m,
+\)
+$m = 3$ typical, with
+$\sigma_{\max}$ tuned so the round-trip reflection
+$R = \exp(-2\sigma_{\max} L_{\text{PML}}/((m+1)c))$ sits at the
+target ($R \sim 10^{-5}$).  Adding CPML to
+\texttt{Maxwell\_Kokkos} would require, roughly:
+\begin{enumerate}[itemsep=1pt,topsep=2pt]
+  \item Pad the grid by $N_{\text{PML}} \approx 10$ cells per
+        physical face.
+  \item Add six auxiliary $\Psi$ fields per spatial derivative on
+        the PML region.
+  \item Replace \texttt{SIMPLE\_MAXWELL\_INTERIOR\_DOT} with a
+        PML-aware cousin in the layer cells (a per-point helper
+        function rather than a fixed-coefficient macro).
+  \item Apply matching damping profiles to the constraint-damping
+        $\Psi_D, \Psi_B$ blocks.
+  \item Use a trivial zero-Dirichlet (or zero-SAT) boundary at the
+        outermost cell of the PML.
+\end{enumerate}
+A few hundred lines of code and a week of careful convergence
+testing.  Comparison summary:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+                   & SBP-SAT (current)                & PML (future) \\
+\midrule
+Mechanism          & Characteristic projection         & Complex coordinate stretching \\
+Normal incidence   & Exact for $\tau \geq 1/2$         & Near-exact, $R \sim 10^{-5}$ \\
+Grazing incidence  & Strongly reflective               & Near-exact \\
+Extra grid cells   & None                              & $\sim 10$ per physical face \\
+Extra fields       & None                              & One $\Psi$ per stretched derivative \\
+Energy estimate    & Yes (provable)                    & Indirect (round-trip bound) \\
+Handles lens refl. & Head-on only                      & All angles \\
+Code complexity    & Low                               & Medium--high \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The choice between SAT and PML is a design decision, not a
+correctness one.  For a teaching code demonstrating SBP-SAT, SAT
+alone is appropriate.  For production scattering simulations, PML
+is the right tool.
+
+\section{Software architecture: Kokkos integration}
+\label{sec:kokkos-arch}
+
+This section is the unique value-added of the Kokkos port.
+Sections~\ref{sec:physics}--\ref{sec:pml} apply equally to the
+parent C version; the rest of this document is specific to
+\texttt{Maxwell\_Kokkos}.
+
+\subsection{Driving design choice}
+
+A \texttt{Kokkos::View<double***, LayoutLeft>} sized
+$(N_x, N_y, N_z)$ has the same flat-index offset
+$\mathtt{ijk} = i + j N_x + k N_x N_y$ as the C version's
+\texttt{double*} arrays.  Every kernel extracts a raw
+\texttt{double*} via \texttt{view.data()} \emph{outside} the
+parallel region:
+
+\begin{lstlisting}[style=cpp]
+double *Bx    = gfs->evol[BX_SLOT].state.data();
+double *dotBx = gfs->evol[BX_SLOT].K[kidx].data();
+// ...
+
+Kokkos::parallel_for("interior", policy,
+    KOKKOS_LAMBDA(int64_t i, int64_t j, int64_t k) {
+        const int64_t ijk = i + j*nx + k*nx*ny;
+        SIMPLE_MAXWELL_INTERIOR_DOT;   // uses Bx[ijk], dotBx[ijk], ...
+    });
+\end{lstlisting}
+
+The lambda captures the pointers \emph{by value} (\texttt{[=]}); on
+the OpenMP backend they point to host memory, on CUDA to device
+memory.  Either way, \texttt{Bx[ijk]} resolves through the captured
+pointer to the right address.
+
+\paragraph{The single payoff.}
+The SymPy-generated \texttt{simple\_maxwell.h} macros and the
+SBP-4-2 stencils in \texttt{derivatives.hpp} need no source changes
+other than annotating each \texttt{static inline} stencil with
+\texttt{KOKKOS\_INLINE\_FUNCTION}.  The pointer-aliasing strategy
+keeps the access pattern \texttt{Bx[ijk]} working unchanged --- so
+\texttt{generate\_ccode.py} did not need updating, and
+\texttt{make check-generated} (the SymPy-vs-source consistency
+check from the parent) still passes byte-for-byte.
+
+\subsection{Three-region kernel partition}
+
+The time-derivative function \texttt{maxwell\_eq\_time\_deriv}
+issues four \texttt{parallel\_for} launches, mirroring the C
+version's three-region shell partition:
+
+\begin{enumerate}[itemsep=1pt,topsep=2pt]
+  \item \textbf{Deep interior}: every cell sufficiently far from
+        every physical face uses fixed \texttt{D4CEN} on all axes.
+        No branches in the kernel body --- this is the hot path.
+  \item \textbf{Shell A}: $z$-shell rows ($k$ in the SBP closure
+        zone), full $(j, i)$.  Runtime stencil dispatch on all
+        three axes via \texttt{stencil\_at} +
+        \texttt{apply\_stencil}.  Per-face SAT penalties added
+        when the cell sits on a physical boundary row.
+  \item \textbf{Shell B}: $y$-shell rows, $z$ in deep interior,
+        full $i$.  $z$-stencil known to be \texttt{D4CEN}; $x, y$
+        dispatched at runtime.
+  \item \textbf{Shell C}: $x$-shell rows, $y, z$ in deep interior.
+        Only $x$ dispatched at runtime.
+\end{enumerate}
+The three shell regions partition the boundary shell exactly
+once, so each cell is visited at most twice (once interior, once
+shell) and each SAT face fires at most once per RK4 stage at any
+given cell, even at edges and corners.  The same partition appears
+in \texttt{maxwell\_constraints} for the diagnostic divergences
+$c_D, c_B$.
+
+\subsection{Ghost-zone exchange}
+
+\texttt{sync\_vars(NGFS\&, var\_type, kidx)} performs the standard
+non-blocking neighbour exchange in three sequential axis sweeps
+($x$, then $y$, then $z$).  Pack and unpack are
+\texttt{parallel\_for} kernels writing into a
+\texttt{Kokkos::View<double*>} per axis face; on the CUDA backend
+the device buffer is deep-copied to a host mirror before the MPI
+call (or sent directly when built with
+\texttt{MAXWELL\_CUDA\_AWARE\_MPI=ON}).
+
+The axis order is sequential rather than fully parallel because
+the $y$-axis send box includes $x$-ghost columns at $j \in [g_s,
+2g_s)$; the $y$-sync only delivers correct corner data if $x$ has
+already been synced.  The Maxwell production stencils are
+axis-aligned and never read corner ghosts, so a fully parallel
+exchange would be functionally correct for the PDE solve, but the
+\texttt{test\_sync} harness corrupts and verifies all ghost cells
+including corners.  Sequential order matches the C version.
+
+The special form \texttt{sync\_vars(gfs, EVOLVED, -1)} syncs the
+\texttt{state} buffer instead of \texttt{K[kidx]} --- used by the
+startup sync test in the driver to validate
+\texttt{set\_initial\_data}.
+
+\subsection{Reductions}
+
+\texttt{l2\_error\_analytic} is one
+\texttt{Kokkos::parallel\_reduce} accumulating the squared $L^2$
+residual across all nine evolved fields into a single
+\texttt{double}, followed by \texttt{MPI\_Allreduce} on
+$(\text{sum}, \text{count})$.  The collective is the only
+synchronisation between ranks during evaluation.
+
+\subsection{File map}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+File & Origin & Role \\
+\midrule
+\texttt{driver.cpp}            & ported    & Top-level driver, RK4 loop \\
+\texttt{maxwell\_eqs.\{hpp,cpp\}} & ported & Time deriv + constraints + IC + L2 \\
+\texttt{rk4.\{hpp,cpp\}}       & ported    & Kokkos RK4 \\
+\texttt{numerical.\{hpp,cpp\}} & ported    & \texttt{apply\_dissipation} \\
+\texttt{comm.\{hpp,cpp\}}      & ported    & Ghost-zone sync \\
+\texttt{gf.\{hpp,cpp\}}        & ported    & View-owning \texttt{NGFS} \\
+\texttt{io.\{hpp,cpp\}}        & ported    & HDF5 output + checkpoint/restart \\
+\texttt{HDF5BinaryWrite.\{hpp,cpp\}} & ported & HDF5 file/group/dataset wrapper \\
+\texttt{analytic\_parameters.h}  & ported    & POD parameter structs (per-source) \\
+\texttt{analytic\_solutions.hpp} & ported    & Kokkos-callable analytic evaluators \\
+\texttt{derivatives.hpp}         & ported    & D4CEN, SBP-4-2 closures, dissipation \\
+\texttt{simple\_maxwell.h}     & verbatim  & SymPy-generated SAT \& interior macros \\
+\texttt{generate\_ccode.py}    & verbatim  & SymPy emitter \\
+\texttt{domain.\{c,h\}}        & verbatim  & MPI Cartesian topology \\
+\texttt{maxwell\_parameters.\{h,cpp\}} & verbatim & POD parameter ABI;
+                                                    TOML $\to$ \texttt{maxwell\_param\_st} \\
+\texttt{parameter.\{hpp,cpp\}}  & verbatim  & Internal toml++ helpers
+                                              (namespace \texttt{parameters}) \\
+\texttt{toml.hpp}              & verbatim  & toml++ vendored header \\
+\texttt{timer.\{c,h\}}         & verbatim  & Hierarchical timer \\
+\texttt{tests/test\_topology.c}& verbatim  & MPI decomposition unit test \\
+\texttt{tests/test\_rk4.cpp}   & ported    & RK4 4th-order convergence test \\
+\texttt{tests/test\_sync.cpp}  & ported    & Ghost-zone exchange unit test \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Build}
+\label{sec:build}
+
+\subsection{Prerequisites}
+
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item CMake $\geq 3.18$.
+  \item C++20 compiler.  Tested: GCC 13, GCC 15.  GCC 12 has a
+        known interaction with toml++; see
+        \S\ref{sec:known}.
+  \item MPI (OpenMPI, MPICH, or any MPI-3 implementation).
+  \item HDF5 with the C and HL components.
+  \item For the GPU build: CUDA Toolkit $\geq 11.4$ targeting an
+        appropriate GPU architecture.
+\end{itemize}
+
+\subsection{Default OpenMP build}
+\begin{lstlisting}[style=shell]
+cd Week15/Maxwell_Kokkos/src
+cmake -S . -B build
+cmake --build build -j
+\end{lstlisting}
+This produces \texttt{build/maxwell\_system} plus the three test
+executables under \texttt{build/tests/}.
+
+\subsection{CUDA build}
+\begin{lstlisting}[style=shell]
+cmake -S . -B build \
+      -DKokkos_ENABLE_OPENMP=OFF \
+      -DKokkos_ENABLE_CUDA=ON   \
+      -DKokkos_ARCH_AMPERE80=ON
+cmake --build build -j
+\end{lstlisting}
+Replace \texttt{Kokkos\_ARCH\_AMPERE80} with the
+\texttt{Kokkos\_ARCH\_*} variable for your GPU's compute capability
+(\texttt{HOPPER90} for an H100, \texttt{TURING75} for a T4, etc.).
+
+\subsection{CUDA-aware MPI}
+\begin{lstlisting}[style=shell]
+cmake -S . -B build \
+      -DKokkos_ENABLE_OPENMP=OFF \
+      -DKokkos_ENABLE_CUDA=ON   \
+      -DKokkos_ARCH_AMPERE80=ON \
+      -DMAXWELL_CUDA_AWARE_MPI=ON
+\end{lstlisting}
+Skips the device--host buffer hop in \texttt{comm.cpp} and hands
+device pointers directly to MPI.  Requires an MPI install built
+with CUDA awareness (e.g.\ OpenMPI \texttt{--with-cuda}).
+
+\subsection{CMake options reference}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Option & Default & Effect \\
+\midrule
+\texttt{Kokkos\_ENABLE\_OPENMP}    & \texttt{ON}      & OpenMP host backend \\
+\texttt{Kokkos\_ENABLE\_CUDA}      & \texttt{OFF}     & CUDA device backend \\
+\texttt{Kokkos\_ARCH\_<arch>}      & unset            & Required when CUDA \\
+\texttt{MAXWELL\_CUDA\_AWARE\_MPI} & \texttt{OFF}     & Device pointers to MPI \\
+\texttt{CMAKE\_BUILD\_TYPE}        & \texttt{Release} & Standard CMake \\
+\texttt{CMAKE\_CXX\_STANDARD}      & \texttt{20}      & Hard requirement \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Source-level switches}
+
+Defining \texttt{TIMING\_ONLY} on the compile line skips HDF5
+output and L$^2$ reporting in the main loop, leaving only kernel
+work for clean per-step timing.
+
+\section{Running}
+\label{sec:running}
+
+\begin{lstlisting}[style=shell]
+mpirun -np <N> ./maxwell_system path/to/maxwell.toml
+\end{lstlisting}
+
+\subsection{Parameter file structure}
+\label{sec:toml}
+
+\paragraph{[grid]}
+\begin{lstlisting}[style=shell]
+nx = 64          # global grid points in x (total, not per rank)
+ny = 64
+nz = 128
+x0 = -1.0        # lower corner
+y0 = -1.0
+z0 =  0.0
+xn =  1.0        # upper corner
+yn =  1.0
+zn =  4.0
+periodic_x = false  # if true: no SAT on this axis, ghost zones wrap
+periodic_y = false
+periodic_z = false
+\end{lstlisting}
+
+\paragraph{[solver]}
+\begin{lstlisting}[style=shell]
+ghost_size       = 3
+cfl_factor       = 0.2    # <= 0.2 for all-physical; <= 0.5 for periodic x,y
+max_iterations   = 2049
+output_every     = 32
+checkpoint_every = 512
+max_checkpoints  = 2
+recover          = false
+use_dissipation  = false  # Kreiss-Oliger; off by default
+diss_coeff       = 0.1
+tau              = 1.0    # SAT penalty strength, >= 1/2
+\end{lstlisting}
+
+\paragraph{[physics]}
+\begin{lstlisting}[style=shell]
+kappa_D = 0.1
+kappa_B = 0.1
+\end{lstlisting}
+
+\paragraph{[source]}
+\begin{lstlisting}[style=shell]
+[source]
+type = "gaussian_beam"   # or "plane_wave" or "te_waveguide_mode"
+
+[source.plane_wave]
+ax     = 1.0       # x-polarisation amplitude
+ay     = 1.0       # y-polarisation amplitude
+k      = 4.0       # wavenumber
+bump_a = 0.0       # envelope turn-on start (in t-z)
+bump_b = 2.0       # envelope turn-on end
+
+[source.gaussian_beam]
+w0        = 0.20   # waist radius
+z_waist   = 2.0    # z location of waist (inside domain for lens demo)
+k         = 15.0   # wavenumber
+amplitude = 1.0    # peak field amplitude
+ramp_a    = 0.0    # turn-on start (in t)
+ramp_b    = 1.0    # turn-on end
+
+[source.te_waveguide_mode]
+l = 2
+m = 2
+n = 2
+\end{lstlisting}
+
+\paragraph{[material]}
+\begin{lstlisting}[style=shell]
+[material]
+epsilon_type = "elliptical"   # or "uniform"
+
+[material.background]
+epsilon = 1.0                 # baseline (asymptote of elliptical profile)
+mu      = 1.0
+sigma   = 0.0
+
+[material.elliptical]
+max = 4.0                     # peak permittivity at lens centre
+x0  = 0.0
+z0  = 2.0
+s   = 2.0                     # steepness
+a   = 0.5                     # semi-axis x
+b   = 0.25                    # semi-axis z
+\end{lstlisting}
+
+\subsection{Two canonical configurations}
+
+\paragraph{Option B: plane-wave convergence reference.}
+Periodic $x, y$, non-periodic $z$, plane-wave source.  The only
+configuration in which an exact, non-dispersive travelling-wave
+solution exists for the plane-wave source:
+\begin{lstlisting}[style=shell]
+[grid]
+periodic_x = true
+periodic_y = true
+periodic_z = false
+
+[source]
+type = "plane_wave"
+\end{lstlisting}
+On a sequence of refined grids, the $L^2$ error against the
+analytic reduces at the order of the SBP-$(4,2)$ boundary closure
+(formally 2nd-order locally at the boundary, integrating to
+higher order globally; empirically around 3rd-order).
+
+\paragraph{Option A: beam through lens.}
+All six faces non-periodic with SAT, Gaussian-beam source,
+elliptical permittivity:
+\begin{lstlisting}[style=shell]
+[grid]
+periodic_x = false
+periodic_y = false
+periodic_z = false
+
+[source]
+type = "gaussian_beam"
+
+[material]
+epsilon_type = "elliptical"
+\end{lstlisting}
+
+\subsection{Output layout}
+
+Each rank writes a self-describing \texttt{3D\_rank\_<R>.h5}
+containing the full state at every output interval, grouped by
+output index.  Groups $/0, /1, /2, \ldots$ correspond to the
+initial state, the first output step, etc.\ (step $N$ is at time
+$N \cdot \mathtt{output\_every}\cdot dt$).  Each group has
+datasets for the nine evolved variables and the five auxiliaries
+(including the diagnostic divergences $c_D, c_B$).  The
+\texttt{/metadata} group carries per-rank attributes describing
+the grid (origin, spacing, local and global sizes, ghost width,
+variable names) --- everything needed to reassemble the global
+domain.
+
+With the beam source's smooth turn-on, group \texttt{/0} contains
+identically zero fields.  The first non-trivial output is at
+$t = \mathtt{output\_every}\cdot dt$; by $t \geq \mathtt{ramp\_b}$
+the envelope has saturated.
+
+An $L^2$ diagnostic \texttt{l2\_norm.dat} is written by rank 0 at
+every output step, containing
+$(t,\ \|U_{\text{numerical}} - U_{\text{analytic}}\|_{L^2})$.
+For \texttt{plane\_wave} with periodic $x, y$ and for
+\texttt{te\_waveguide\_mode}, this is a real convergence metric.
+For \texttt{gaussian\_beam} the analytic reference is only the
+paraxial approximation, so the $L^2$ error reaches a paraxial-scale
+plateau, not zero.
+
+\subsection{Visualization}
+
+\begin{lstlisting}[style=shell]
+python scripts/make_xdmf.py --dir <run_dir> --dt-per-output T
+\end{lstlisting}
+where
+$T = \mathtt{output\_every}\cdot c\cdot \min(dx, dy, dz)$ is the
+physical time between output groups.  The script scans the
+per-rank HDF5 files, reads their \texttt{/metadata}, and emits a
+single \texttt{maxwell.xmf} alongside.  The manifest is pure XML
+metadata --- the payload bytes stay in HDF5.  The result opens
+directly in:
+\begin{itemize}[itemsep=1pt,topsep=2pt]
+  \item ParaView (Xdmf3 reader preferred),
+  \item VisIt (Xdmf plugin),
+  \item PyVista (\texttt{pyvista.XdmfReader("maxwell.xmf")}).
+\end{itemize}
+A time slider stepping through the $N$ output steps appears
+automatically; all 14 fields are selectable as point-data
+attributes.
+
+\paragraph{Grid-layout details.}
+The XDMF uses a \texttt{3DRectMesh} topology with explicit
+\texttt{VXVYVZ} geometry (one per-axis coordinate list).  This
+avoids the long-standing XDMF \texttt{ORIGIN\_DXDYDZ} ambiguity in
+which VisIt and ParaView disagree on whether the origin tuple is
+in spatial $(x, y, z)$ or topology $(z, y, x)$ order;
+\texttt{VXVYVZ} tags each axis explicitly.
+
+\paragraph{Legacy fallback.}
+\texttt{scripts/hdf5\_to\_vtk.py} reassembles the global grid on
+rank 0 and writes one VTI per time step.  Serial, duplicates the
+data on disk; supplied only as a fallback.
+
+\subsection{Checkpoint restart}
+
+Set \texttt{[solver].recover = true} and re-run with the same
+TOML.  The driver locates the highest-iteration checkpoint for
+this rank and resumes; HDF5 group numbering continues monotonically
+from the recovered iteration.
+
+\subsection{Diagnostics and common problems}
+
+\paragraph{$L^2$ error blows up exponentially.}
+Usually CFL is too large.  Reduce \texttt{cfl\_factor} to 0.2 (six-
+face SAT) or verify the configuration is in fact Option B if you
+expected $\mathrm{cfl} = 0.4$ to work.
+
+\paragraph{$D$ field looks empty in visualization.}
+Check the time slice.  Group \texttt{/0} is the initial state,
+which is zero for both plane-wave and Gaussian-beam sources.  For
+the default ramp $[0, 1]$ on the shipped TOML, the beam reaches
+${\sim}3\%$ by group \texttt{/1} ($t = 0.2$) and full amplitude by
+$t \geq \mathtt{ramp\_b}$; visualise group \texttt{/5} or later
+for the default parameters.
+
+\paragraph{Paraxial residual looks larger than expected.}
+Verify $k\cdot w_0 \gtrsim 5$.  Residual scales as $1/(kw_0)^2$.
+
+\paragraph{Beam appears to reflect off the transverse walls.}
+The $x, y$ faces use $g = 0$ SAT; reflection amplitude is
+proportional to the field amplitude at the wall.  Increase $L_x,
+L_y$ or reduce $w_0$ so the tail is negligible.  Rule of thumb:
+$L_x \geq 10\, w_0$, where $w_0$ is the local spot size along the
+propagation, not the waist.
+
+\paragraph{High-frequency oblique wavefronts at late times.}
+Combined signature of (a) a real standing wave from incident +
+lens-reflected beam interfering every $\lambda/2 = \pi/k$ and (b)
+spurious angular reflections of lens-scattered energy off every
+SAT face.  (a) is physics; (b) is the SAT limitation
+(\S\ref{sec:oblique-reflection}).  Enabling Kreiss-Oliger
+dissipation suppresses the high-frequency component.  For truly
+angle-independent absorption the code would need a PML
+(\S\ref{sec:pml}).
+
+\section{Tests}
+\label{sec:tests}
+
+Three test executables ship with the build, plus a Python
+convergence harness (\S\ref{sec:convergence}).
+
+\subsection{\texttt{test\_topology}}
+
+Pure CPU; exercises \texttt{automatic\_topology}, the greedy
+prime-factor MPI Cartesian decomposition.  Single-process; runs
+through a battery of grid shapes and process counts.
+
+\subsection{\texttt{test\_rk4}}
+
+Solves $dy/dt = -y$ with $y(0) = 1$ on a small grid for
+$t \in [0, 1]$ at two time-step sizes.  Asserts the error ratio
+between $\Delta t = 0.01$ and $\Delta t/2$ is between 12 and 20,
+i.e.\ within tolerance of the expected fourth-order rate
+$2^4 = 16$.  Drives the Kokkos RK4 + sync paths end-to-end on a
+trivial PDE.
+
+\subsection{\texttt{test\_sync}}
+
+The infrastructure correctness test.  Workflow: fill all evolved
+and auxiliary fields with a known smooth function on the local
+grid, corrupt every ghost cell with a sentinel value, call
+\texttt{sync\_vars}, then verify every cell (including ghosts)
+matches the analytic value.  Driven by \texttt{run\_tests.sh} at
+1, 2, 4, 6, 8, and 27 ranks across three boundary configurations:
+fully physical (\texttt{0 0 0}), periodic $x, y$ + physical $z$
+(\texttt{1 1 0}, the Maxwell default), and fully periodic
+(\texttt{1 1 1}).
+
+\subsection{Running the suite}
+
+\begin{lstlisting}[style=shell]
+cd build
+ctest                  # runs tests/run_tests.sh
+                       # = test_topology, test_rk4, and the
+                       #   12-config test_sync grid
+
+cd ..
+python scripts/convergence_test.py \
+       --solver src/build/maxwell_system \
+       --resolutions 16 24 32 48 \
+       --final-time 0.1 --np 4
+\end{lstlisting}
+
+\section{Verification: convergence testing}
+\label{sec:convergence}
+
+A direct test for the correctness of the interior stencil, each
+face's SBP-SAT closure, and the additive penalty at edges and
+corners is obtained by forcing the numerical solution to converge
+to a known analytic solution and measuring the convergence rate.
+
+\subsection{Test problem}
+
+The test uses the \texttt{te\_waveguide\_mode} (\S\ref{sec:te-mode}),
+which is an exact vacuum Maxwell solution with
+$\eps = \mu = 1, \sigma = 0$ on the unit cube $[0,1]^3$.  When
+\texttt{[source].type = "te\_waveguide\_mode"}, the code routes
+the analytic as boundary data $g$ on \emph{every} physical face
+(not just lower-$z$).  At each SAT-face point, the scheme
+evaluates the analytic at the local $(x, y, z, t)$ and passes it
+into the relevant \texttt{APPLY\_SAT\_*} macro.  The numerical
+state is driven toward the analytic through the
+incoming-characteristic projection of every physical face; the
+outgoing characteristics are untouched, so the test is consistent
+with the method's energy argument.
+
+The scheme being tested is:
+\begin{itemize}[itemsep=1pt,topsep=2pt]
+  \item Deep interior: 4th-order centered stencil \texttt{D4CEN}
+        in all three directions.
+  \item Near-boundary rows on physical axes: SBP 4-2 one-sided
+        closures.
+  \item Exactly one boundary row per physical face: SAT penalty
+        with $g$ from the analytic.
+  \item Edges (two faces meet): two SAT penalties additive.
+  \item Corners (three faces meet): three SAT penalties additive.
+  \item Time integration: classical RK4.
+\end{itemize}
+
+\subsection{The four configurations}
+
+The boundary periodicities are varied per axis to change which
+boundary structures are exercised:
+
+\begin{center}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Configuration       & \texttt{periodic\_x} & \texttt{periodic\_y} & \texttt{periodic\_z}
+                    & Faces / Edges / Corners & Expected $L^2$ rate \\
+\midrule
+\texttt{fully\_periodic} & true  & true  & true  & 0 / 0 / 0   & 4 \\
+\texttt{z\_physical}     & true  & true  & false & 2 / 0 / 0   & 3 \\
+\texttt{yz\_physical}    & true  & false & false & 4 / 4 / 0   & 3 \\
+\texttt{all\_physical}   & false & false & false & 6 / 12 / 8  & 3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{What each configuration localises.}
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \texttt{fully\_periodic}: no SBP closures, no SAT.  All
+        derivatives are \texttt{D4CEN} with periodic ghosts.
+        Tests only the interior stencil.  Expected rate 4.
+  \item \texttt{z\_physical}: only the two $z$-faces are physical;
+        $x, y$ stay periodic.  Tests interior + $z$-face SBP +
+        SAT.  No physical edges or corners.  A drop here means
+        face-level SBP or SAT is broken.
+  \item \texttt{yz\_physical}: adds four $y$-$z$ edges.  A drop
+        from \texttt{z\_physical} to \texttt{yz\_physical} means
+        the additive edge penalty is broken.
+  \item \texttt{all\_physical}: full setup --- six faces, twelve
+        edges, eight corners.  A drop here means the three-face
+        corner penalty is broken.
+\end{itemize}
+
+\subsection{Why the expected rates are 4 and 3}
+
+The scheme is formally:
+\begin{itemize}[itemsep=1pt,topsep=2pt]
+  \item 4th-order in the interior (\texttt{D4CEN} is $O(h^4)$).
+  \item 2nd-order locally at the SBP-4-2 boundary rows (Strand
+        closures are $O(h^2)$).
+\end{itemize}
+For a hyperbolic system discretized by an SBP operator with
+interior order $2p$ and boundary truncation order $s$, the
+classical Svärd--Nordström result predicts a global $L^2$ rate of
+$\min(2p,\, s + 1)$ at late times.  For SBP-4-2 with $2p = 4,
+s = 2$: rate 3.  The interior-only configuration sidesteps the
+boundary closures and retains the full 4th-order rate.
+
+Two practical notes:
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item The $s + 1$ rule applies per face; edges and corners do
+        not further degrade the rate because the additive SAT
+        gives independent energy estimates that combine as a
+        maximum, not a product.  This is the feature being tested.
+  \item Measured rates often approach 3 from above at finite $N$
+        --- rates of 3.1--3.2 at $N = 48$ are typical for the
+        SBP-4-2 scheme; they asymptote to exactly 3 as
+        $N \to \infty$.  A rate persistently \emph{below} 3 at
+        moderate $N$ indicates a real problem.
+\end{itemize}
+
+\subsection{Running the convergence test}
+
+\begin{lstlisting}[style=shell]
+python scripts/convergence_test.py \
+    --solver src/build/maxwell_system \
+    --resolutions 16 24 32 48 \
+    --final-time 0.1 \
+    --np 4
+\end{lstlisting}
+Options: \texttt{--solver PATH}, \texttt{--resolutions N1 N2 ...},
+\texttt{--final-time T}, \texttt{--cfl C} (default 0.2),
+\texttt{--np N}, \texttt{--work-dir DIR}.
+
+The driver runs the four configurations in sequence; each prints
+per-resolution errors and pairwise rates.  A summary table at the
+end compares measured final rates against expected:
+
+\begin{verbatim}
+=== SUMMARY ===
+config              N=16        N=24        N=32        N=48  final rate
+fully_periodic  0.001041   0.0002078   6.597e-05   1.306e-05    3.994   OK
+z_physical       0.00739    0.002273   0.0009391    0.000261    3.158   OK
+yz_physical     0.009489    0.002867    0.001174    0.000325    3.167   OK
+all_physical     0.01092    0.003261    0.001328    0.000368    3.166   OK
+\end{verbatim}
+
+A rate is flagged \texttt{SUSPICIOUS} if it deviates from expected
+by more than 1.0; the driver exits nonzero.
+
+\subsection{Baseline results (Kokkos OpenMP backend, validated)}
+
+\begin{center}
+\small
+\begin{tabular}{lcccc|c}
+\toprule
+Configuration            & $N=16$               & $N=24$              & $N=32$             & $N=48$              & Final rate \\
+\midrule
+\texttt{fully\_periodic} & $1.04\cdot 10^{-3}$  & $2.08\cdot 10^{-4}$ & $6.60\cdot 10^{-5}$ & $1.31\cdot 10^{-5}$ & 3.99 \\
+\texttt{z\_physical}     & $7.39\cdot 10^{-3}$  & $2.27\cdot 10^{-3}$ & $9.39\cdot 10^{-4}$ & $2.61\cdot 10^{-4}$ & 3.16 \\
+\texttt{yz\_physical}    & $9.49\cdot 10^{-3}$  & $2.87\cdot 10^{-3}$ & $1.17\cdot 10^{-3}$ & $3.25\cdot 10^{-4}$ & 3.17 \\
+\texttt{all\_physical}   & $1.09\cdot 10^{-2}$  & $3.26\cdot 10^{-3}$ & $1.33\cdot 10^{-3}$ & $3.68\cdot 10^{-4}$ & 3.17 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+These match the C-version's reference numbers from
+\texttt{Maxwell\_Penalty/Review.md \S 1} to four significant
+figures.  Run parameters: $T_{\text{final}} = 0.1$,
+$\mathrm{cfl} = 0.2$, $\tau = 1.0$, four MPI ranks, uniform
+$\eps = \mu = 1$, $\sigma = 0$, mode $(l, m, n) = (2, 2, 2)$.
+
+\subsection{Interpreting a failed test}
+
+If a future change causes a rate to drop, the configuration
+hierarchy localises the fault:
+
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \texttt{fully\_periodic} drops below 4: the interior
+        \texttt{D4CEN} stencil, ghost-zone sync, or periodic
+        wrap is broken.
+  \item \texttt{z\_physical} drops below 3 while
+        \texttt{fully\_periodic} stays at 4: the $z$-face SBP
+        closures or the lower/upper-$z$ SAT penalty is broken.
+  \item \texttt{yz\_physical} drops below 3 while
+        \texttt{z\_physical} is fine: the additive edge penalty
+        at $y$-$z$ edges is broken.
+  \item \texttt{all\_physical} drops below 3 while
+        \texttt{yz\_physical} is fine: the three-face corner
+        penalty is broken.
+\end{itemize}
+
+A successful pass on all four rows confirms that every part of
+the algorithm --- interior stencil, face closure, face SAT, edge
+additivity, corner additivity --- is correctly implemented.
+
+\paragraph{A subtle point: why the oblique-reflection failure mode
+of \S\ref{sec:oblique-reflection} does not break this test.}
+The \texttt{te\_waveguide\_mode} has nontrivial structure in every
+direction and hits the $\pm x, \pm y$ faces at oblique angles ---
+the exact configuration mis-handled by the $g = 0$ SAT used in the
+lens demo.  One could reasonably expect spurious reflections to
+pollute the rate.
+
+This does not happen because the convergence test uses
+$g = \text{analytic}$ on every physical face, not $g = 0$.  The
+absorbing-boundary failure mode arises only when the prescribed
+incoming data disagrees with the true physical solution at the
+boundary: with $g = 0$ and a nonzero tangential field, the SAT
+pulls the wave toward zero instead of toward its true value,
+generating the spurious reflection.  When $g$ equals the exact
+analytic at every boundary point, the SAT imposes the correct
+incoming data on every face regardless of incidence angle.
+Mathematically, the SAT penalty is a weak-form Dirichlet
+imposition of the incoming characteristic; with the correct
+right-hand side it has no angular blind spot.
+
+The convergence test therefore verifies that the SBP-SAT scheme,
+\emph{given the correct incoming data}, converges to the analytic
+at the expected rate.  It is a test of the scheme's
+implementation, not of the quality of absorbing boundaries in
+the lens-demo sense.
+
+\paragraph{Caveats.}
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item The \texttt{te\_waveguide\_mode} source requires
+        $\eps = \mu = 1, \sigma = 0$.  The test does not
+        exercise spatially-varying permittivity; that's a separate
+        physics question.
+  \item The constraint fields $\Psi_D, \Psi_B$ are identically
+        zero in the analytic.  The constraint-damping blocks of
+        the SAT are exercised only by their coupling to the EM
+        blocks through residual numerical violations, so a bug
+        localised entirely to those blocks might not be caught at
+        full sensitivity.
+  \item The test uses $g = \text{analytic}$ on every face and
+        therefore does \emph{not} measure the quality of the
+        $g = 0$ absorbing boundary on oblique waves --- that is a
+        physics question (\S\ref{sec:oblique-reflection}) and a
+        design question about replacing SAT with PML
+        (\S\ref{sec:pml}), not an implementation question about
+        the SAT itself.
+\end{itemize}
+
+\section{Validation status}
+\label{sec:status}
+
+\subsection{Verified on the OpenMP backend}
+
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item All 14 \texttt{run\_tests.sh} configurations pass:
+        \texttt{test\_topology}, \texttt{test\_rk4}, and 12
+        \texttt{test\_sync} cases at 1--27 ranks across three
+        boundary configurations.
+  \item Convergence test passes at all four configurations to
+        within 5\% of the expected asymptote at $N=16, 24, 32,
+        48$: 3.99 (fully periodic), 3.16/3.17/3.17 (boundary
+        configurations) at $N=48$.  These rates match the
+        C-version's published reference numbers in
+        \texttt{Maxwell\_Penalty/Review.md \S 1} to four
+        significant figures.
+  \item Smoke runs of both demo TOMLs (\texttt{maxwell.toml},
+        \texttt{maxwell\_waveguide.toml}) complete normally with
+        the documented $L^2$ behaviour.
+\end{itemize}
+
+\subsection{Built but not yet runtime-verified}
+
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \textbf{CUDA backend.}  Builds cleanly on an A100 host
+        with the toolchain pitfalls in \S\ref{sec:known} resolved.
+        Runtime convergence test on the GPU is the recommended
+        next validation step.
+  \item \textbf{CUDA-aware MPI.}  The
+        \texttt{MAXWELL\_CUDA\_AWARE\_MPI=ON} compile path
+        compiles, but no test distinguishes a CUDA-aware build
+        from the default host-mirror build other than performance.
+  \item \textbf{Checkpoint restart.}  Both
+        \texttt{write\_checkpoint} and \texttt{read\_checkpoint}
+        are ported and link, but no automated round-trip
+        verification is in the test suite.
+  \item \textbf{\texttt{make check-generated}.}
+        \texttt{generate\_ccode.py} is unchanged from the C
+        version and emits a \texttt{simple\_maxwell.h}
+        byte-for-byte identical to the checked-in copy, but no
+        CMake target exercises this.
+\end{itemize}
+
+\subsection{Recommended GPU-side test sequence}
+
+After a successful CUDA build, validate in this order:
+\begin{enumerate}[itemsep=2pt,topsep=2pt]
+  \item \texttt{./tests/test\_rk4} --- expect
+        \texttt{Kokkos exec space: Cuda} and the 4th-order ratio
+        check to pass.
+  \item \texttt{./tests/test\_sync 32 32 32 0 0 0} at
+        \texttt{-np 1} --- exercises the device pack/unpack and
+        the host-mirror MPI hop.
+  \item \texttt{python scripts/convergence\_test.py --np 1
+        --resolutions 16 24 32 --final-time 0.1} --- the strongest
+        single check.  Each rate should match the OpenMP
+        baseline to better than 0.5\%.
+  \item Diff a 50-step \texttt{maxwell.toml} run's
+        \texttt{l2\_norm.dat} between OpenMP and CUDA --- should
+        agree to $10^{-12}$ or better at every output step.
+\end{enumerate}
+
+\section{Known issues and toolchain workarounds}
+\label{sec:known}
+
+\subsection{OpenMPI 4.x C++ bindings vs.\ \texttt{nvcc}}
+
+OpenMPI's \texttt{mpi.h} pulls in \texttt{mpi/cxx/functions.h} and
+\texttt{mpi/cxx/file.h}, headers from the deprecated MPI-2 C++
+namespace.  Those headers declare member functions like
+\texttt{MPI::Init()} inside an \texttt{extern "C"} block with
+overloads --- legal under \texttt{g++} (which silently picks one),
+illegal under \texttt{nvcc}'s stricter linkage check.
+
+\textbf{Fix} (already in \texttt{CMakeLists.txt}):
+\begin{lstlisting}[style=cpp]
+add_compile_definitions(OMPI_SKIP_MPICXX MPICH_SKIP_MPICXX)
+\end{lstlisting}
+Both macros are recognised by their respective MPI implementations
+and skip the entire \texttt{mpi/cxx/*.h} tree.  The code uses only
+the C MPI API, so dropping the C++ bindings has no functional
+effect.
+
+\subsection{GCC 12 + toml++ + C++20}
+
+GCC 12 (and only GCC 12) miscompiles a generic-lambda
+\texttt{if constexpr} pattern used by toml++:
+\begin{lstlisting}[style=cpp]
+using return_type = decltype(visitor(...));
+if constexpr (impl::is_constructible_or_convertible<bool, return_type>)
+\end{lstlisting}
+The compiler mangles \texttt{return\_type} as \texttt{\_\_T<N>} and
+then fails to find the name in the \texttt{if constexpr}
+expression.
+
+\textbf{Fix (design-level).}  The original parameter header served
+two unrelated roles: declaring the maxwell-specific POD parameter
+ABI (structs + \texttt{parse\_maxwell\_parameters()}) and
+providing toml++-typed helpers
+(\texttt{namespace parameters \{ \ldots \}}) used internally by the
+parser implementation.  These were split into two headers:
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \texttt{maxwell\_parameters.h} --- public ABI: the POD
+        structs the rest of the solver consumes plus the
+        C-callable \texttt{parse\_maxwell\_parameters()}.  No
+        toml++.  Included by \texttt{driver.cpp} (transitively
+        via \texttt{maxwell\_eqs.hpp}) and any consumer of the
+        parsed result.
+  \item \texttt{parameter.hpp} --- internal header of the parser:
+        \texttt{namespace parameters} helpers built on
+        \texttt{toml::table}.  Pulls \texttt{toml.hpp}.  Included
+        only by \texttt{parameter.cpp} (which implements the
+        namespace) and \texttt{maxwell\_parameters.cpp} (which uses
+        it to populate the structs).
+\end{itemize}
+toml++ exposure is now implicit in including
+\texttt{parameter.hpp}; nothing else needs it.  Translation units
+that never include \texttt{parameter.hpp} never see the buggy
+toml++ lambda.  Side benefit: a 15{,}000-line header is no longer
+pulled into the kernel-heavy translation units, which
+substantially shortens compile time.
+
+If a future patch invokes the toml++ helpers from a new
+translation unit and the GCC 12 bug resurfaces, the in-place
+workaround in \texttt{toml.hpp} is to bind the trait to a local
+\texttt{constexpr bool}:
+\begin{lstlisting}[style=cpp]
+using return_type = decltype(...);
+constexpr bool _returns_bool =
+    impl::is_constructible_or_convertible<bool, return_type>;
+if constexpr (_returns_bool) { ... }
+\end{lstlisting}
+Apply at both \texttt{toml.hpp:8239} and \texttt{:8258}.
+
+\subsection{Single-GPU multi-rank}
+
+By default each MPI rank tries to bind device 0.  CUDA contexts
+can be shared, so this is correct, but performance is degraded
+and some operations may serialise.  Workarounds:
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item \texttt{-np 1} for single-GPU correctness checks.
+  \item NVIDIA Multi-Process Service
+        (\texttt{nvidia-cuda-mps-control -d}) for $\leq 2$--$4$
+        ranks.
+  \item On multi-GPU nodes, one rank per GPU
+        (\texttt{mpirun --map-by ppr:1:gpu}).
+\end{itemize}
+
+\subsection{C++20 hard requirement}
+
+Kokkos 5.x rejects C++17 outright.  The C version's TOML files
+build under C++17, but the Kokkos build needs at least C++20.
+GCC 13+, Clang 16+, NVHPC 24+ all satisfy this.
+
+\section*{References}
+
+\begin{itemize}[itemsep=2pt,topsep=2pt]
+  \item Strand, B.\ (1994), \emph{Summation by parts for finite
+        difference approximations of $d/dx$}, J.\ Comput.\ Phys.\
+        110, 47--67.  Source for the SBP-4-2 norm coefficients
+        and one-sided closures used in \texttt{derivatives.hpp}.
+  \item Carpenter, M., Gottlieb, D., Abarbanel, S.\ (1994),
+        \emph{Time-stable boundary conditions for finite-
+        difference schemes solving hyperbolic systems: methodology
+        and application to high-order compact schemes},
+        J.\ Comput.\ Phys.\ 111, 220--236.  Original SAT
+        derivation.
+  \item Svärd, M., Nordström, J.\ (2014), \emph{Review of
+        summation-by-parts schemes for initial-boundary-value
+        problems}, J.\ Comput.\ Phys.\ 268, 17--38.  Source of the
+        $\min(2p, s+1)$ global $L^2$ rate estimate used in
+        \S\ref{sec:convergence}.
+  \item Munz, C.-D., Omnes, P., Schneider, R., Sonnendrücker, E.,
+        Voss, U.\ (2000), \emph{Divergence correction techniques
+        for Maxwell solvers based on a hyperbolic model},
+        J.\ Comput.\ Phys.\ 161, 484--511.  The constraint-damping
+        extension used here.
+  \item Bérenger, J.-P.\ (1994), \emph{A perfectly matched layer
+        for the absorption of electromagnetic waves},
+        J.\ Comput.\ Phys.\ 114, 185--200.  Original split-field
+        PML.
+  \item Roden, J.\,A., Gedney, S.\,D.\ (2000), \emph{Convolutional
+        PML (CPML): an efficient FDTD implementation of the
+        CFS-PML for arbitrary media},
+        Microwave Opt.\ Technol.\ Lett.\ 27, 334--339.  The CPML
+        variant recommended for the proposed extension in
+        \S\ref{sec:pml}.
+  \item Kokkos team (2024). \emph{Kokkos C++ Performance
+        Portability Programming EcoSystem},
+        \url{https://kokkos.org}.
+  \item Trott, C.\ et al.\ (2022), \emph{Kokkos 3: Programming
+        Model Extensions for the Exascale Era}, IEEE TPDS.
+\end{itemize}
+
+\appendix
+
+\section{Summary of SAT formulas}
+\label{app:sat-formulas}
+
+For reference, the full set of SAT contributions applied at the
+boundary rows, derived in \S\ref{sec:sat}.  Let
+$s = \tau \cdot (H^{-1}_0)/h$ be the per-axis penalty scale
+(with $H^{-1}_0 = 48/17$ for the $(4,2)$ SBP norm), and define
+$c, PP$ as in \S\ref{sec:characteristics}.  Where $g$ is zero, the
+$\delta$ quantities reduce to the evolved fields themselves.
+
+\paragraph{Lower-$z$ (nonzero $g$, the incoming beam):}
+\begin{align*}
+  \dot B_x   &\mathrel{-}= s \cdot \tfrac{c}{2} (\delta B_x - PP \cdot \delta D_y) \\
+  \dot D_y   &\mathrel{-}= s \cdot \tfrac{c}{2} (-\delta B_x / PP + \delta D_y) \\
+  \dot B_y   &\mathrel{-}= s \cdot \tfrac{c}{2} (\delta B_y + PP \cdot \delta D_x) \\
+  \dot D_x   &\mathrel{-}= s \cdot \tfrac{c}{2} (\delta B_y / PP + \delta D_x) \\
+  \dot B_z   &\mathrel{-}= s \cdot \tfrac{1}{2} (\delta B_z - \delta \Psi_B) \\
+  \dot \Psi_B &\mathrel{-}= s \cdot \tfrac{1}{2} (-\delta B_z + \delta \Psi_B) \\
+  \dot D_z   &\mathrel{-}= s \cdot \tfrac{1}{2} (\delta D_z - \delta \Psi_D) \\
+  \dot \Psi_D &\mathrel{-}= s \cdot \tfrac{1}{2} (-\delta D_z + \delta \Psi_D)
+\end{align*}
+
+\paragraph{Upper-$z$ ($g = 0$):}
+\begin{align*}
+  \dot B_x   &\mathrel{-}= s \cdot \tfrac{c}{2} (B_x + PP \cdot D_y) \\
+  \dot D_y   &\mathrel{-}= s \cdot \tfrac{c}{2} (B_x / PP + D_y) \\
+  \dot B_y   &\mathrel{-}= s \cdot \tfrac{c}{2} (B_y - PP \cdot D_x) \\
+  \dot D_x   &\mathrel{-}= s \cdot \tfrac{c}{2} (-B_y / PP + D_x) \\
+  \dot B_z   &\mathrel{-}= s \cdot \tfrac{1}{2} (B_z + \Psi_B) \\
+  \dot \Psi_B &\mathrel{-}= s \cdot \tfrac{1}{2} (B_z + \Psi_B) \\
+  \dot D_z   &\mathrel{-}= s \cdot \tfrac{1}{2} (D_z + \Psi_D) \\
+  \dot \Psi_D &\mathrel{-}= s \cdot \tfrac{1}{2} (D_z + \Psi_D)
+\end{align*}
+
+\paragraph{Lower-$x$, lower-$y$, upper-$x$, upper-$y$:} obtained
+from the lower-$z$ and upper-$z$ formulas above by cyclic
+permutation of the axes.  The explicit forms live in
+\texttt{simple\_maxwell.h}, macros
+\texttt{APPLY\_SAT\_\{LOWER,UPPER\}\_\{X,Y,Z\}}.
+
+\end{document}
