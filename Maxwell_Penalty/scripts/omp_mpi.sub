@@ -1,0 +1,22 @@
+#!/bin/bash
+#SBATCH --partition debug
+##
+#SBATCH --account math751
+#SBATCH --time 00:20:00
+##SBATCH --mail-user=YOU@rit.edu  # Please use YOUR email
+#SBATCH --nodes=1
+#SBATCH --mail-type=FAIL
+#SBATCH --ntasks=9
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=90G
+#SBATCH --job-name=mpi_test
+#SBATCH -e stderr_4_%j.err
+#SBATCH -o stdout_4_%j.out
+export I_MPI_JOB_RESPECT_PROCESS_PLACEMENT=0.
+export OMP_NUM_THREADS=4
+
+spack load gcc/hufzekv
+spack load intel-parallel-studio
+spack load openmpi/5agccti
+
+srun -n $SLURM_NTASKS  ./maxwell_periodic 3 3 1 100 100 100

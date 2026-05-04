@@ -1,0 +1,22 @@
+#!/bin/bash
+#SBATCH --partition debug
+##
+#SBATCH --account math751
+#SBATCH --time 00:20:00
+##SBATCH --mail-user=YOU@rit.edu  # Please use YOUR email
+#SBATCH --nodes=1
+#SBATCH --mail-type=FAIL
+#SBATCH --ntasks=4
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=90G
+#SBATCH --job-name=mpi_test
+#SBATCH -e stderr_4_%j.err
+#SBATCH -o stdout_4_%j.out
+
+export OMP_NUM_THREADS=1
+
+
+spack load gcc@12.3.1/lhqcen5
+spack load openmpi@4.1.6%gcc@12.3.1/xcunp5q
+
+srun -n $SLURM_NTASKS  ./maxwell_system maxwell.toml
