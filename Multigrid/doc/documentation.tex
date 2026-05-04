@@ -1,0 +1,949 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage{cleveref}
+
+% --- code listings -----------------------------------------------------------
+\definecolor{codegray}{gray}{0.96}
+\definecolor{codecmnt}{rgb}{0.25,0.50,0.25}
+\definecolor{codekw}{rgb}{0.10,0.10,0.55}
+\definecolor{codestr}{rgb}{0.55,0.10,0.10}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codegray},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecmnt}\itshape,
+  stringstyle=\color{codestr},
+  numbers=left, numberstyle=\tiny\color{gray},
+  stepnumber=1, numbersep=6pt,
+  frame=single, framerule=0pt,
+  breaklines=true, breakatwhitespace=true,
+  showstringspaces=false,
+  captionpos=b,
+  language=C,
+  morekeywords={int64_t,size_t,bool,struct,MPI_Init,MPI_Comm_rank,MPI_Comm_size,
+                MPI_Allreduce,MPI_Cart_create,MPI_Cart_get,MPI_Finalize}
+}
+
+% --- theorem environments ----------------------------------------------------
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+% --- macros ------------------------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\Linf}{L^{\infty}}
+\newcommand{\bigO}{\mathcal{O}}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\spr}{\rho}
+
+\title{A Parallel Geometric Multigrid Solver for the 3D Poisson Equation:\\
+       Algorithm, Implementation, and Extension Guide}
+\author{Documentation for the \texttt{Multigrid} code base\\
+        \small (HPC for Mathematical Modelling, PhD course notes)}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the analytic problem, discretisation, and
+parallel multigrid algorithm implemented in the accompanying code base.
+The implementation solves the three-dimensional Poisson equation on
+the unit cube with homogeneous Dirichlet boundary conditions, using a
+node-based seven-point finite-difference Laplacian, a red-black
+Gauss--Seidel smoother with successive over-relaxation, and a geometric
+V-cycle multigrid acceleration on a halved-grid hierarchy.  The code is
+parallelised with MPI through a Cartesian process topology and ghost-zone
+communication.  We give a self-contained presentation aimed at a PhD-level
+audience in high-performance computing for mathematical modelling, then
+document the user-selectable parameters and explain how to extend the
+solver to other source terms and to non-homogeneous Dirichlet, Neumann,
+and Robin boundary conditions.  Standard references are
+\cite{briggs2000multigrid,trottenberg2001multigrid,hackbusch1985multi,
+saad2003iterative,leveque2007finite}.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+
+% =============================================================================
+\section{Introduction}
+% =============================================================================
+
+The Poisson equation $-\Delta u = f$ is the canonical elliptic boundary-value
+problem and the standard test bed for elliptic solvers.  Its symmetric,
+positive-definite, sparse algebraic structure --- combined with the fact
+that classical relaxation methods (Jacobi, Gauss--Seidel, SOR) are very
+effective at damping high-frequency error components but very poor at
+damping low-frequency components --- makes it the textbook target for
+\emph{multigrid} methods, which combine a smoother on each level of a
+grid hierarchy with coarse-grid correction
+\cite{brandt1977multilevel,fedorenko1964relaxation,
+hackbusch1985multi,trottenberg2001multigrid}.  Multigrid is the
+asymptotically optimal solver for the discrete Poisson problem: it
+reduces the algebraic error by a fixed factor in
+$\bigO(N)$ work, where $N$ is the number of unknowns
+\cite[Ch.~5]{briggs2000multigrid}.
+
+This document describes a \emph{parallel} geometric multigrid implementation
+written in C with MPI.  It is organised as follows:
+\Cref{sec:problem} states the continuous problem;
+\Cref{sec:discretisation} the finite-difference discretisation;
+\Cref{sec:relaxation} reviews the relaxation methods that serve as
+smoothers; \Cref{sec:multigrid} develops the geometric multigrid theory
+needed to follow the implementation; \Cref{sec:implementation} is a
+guided tour of the code; \Cref{sec:parameters} documents the user
+parameters with practical tuning guidance; and \Cref{sec:extension}
+explains how to extend the code to other right-hand sides and boundary
+conditions.
+
+% =============================================================================
+\section{The continuous problem}\label{sec:problem}
+% =============================================================================
+
+Let $\Omega = (0,1)^3 \subset \R^3$.  We seek $u\colon\overline{\Omega}\to\R$
+satisfying
+\begin{equation}\label{eq:poisson}
+  \Delta u(\bx) = f(\bx)\quad \text{in } \Omega,\qquad
+  u(\bx) = 0 \quad \text{on } \partial\Omega,
+\end{equation}
+where $\Delta = \partial_{xx} + \partial_{yy} + \partial_{zz}$ and $f \in
+L^2(\Omega)$.  The associated weak formulation is: find $u\in H^1_0(\Omega)$ such
+that
+\begin{equation}\label{eq:weak}
+  \int_\Omega \nabla u \cdot \nabla v \,d\bx
+  = -\int_\Omega f v \, d\bx
+  \qquad \forall v \in H^1_0(\Omega).
+\end{equation}
+By the Lax--Milgram lemma this problem has a unique solution in $H^1_0(\Omega)$
+\cite[Ch.~6]{evans2010pde}, and on a convex domain such as the unit cube
+the solution lies in $H^2(\Omega)\cap H^1_0(\Omega)$ with the elliptic-regularity
+estimate $\norm{u}_{H^2}\le C \norm{f}_{L^2}$.
+
+The driver currently uses the manufactured smooth solution
+\begin{equation}\label{eq:manufactured}
+  u_\star(\bx) = \sin(\pi x)\sin(\pi y)\sin(\pi z),\qquad
+  f_\star(\bx) = -3\pi^2 \sin(\pi x)\sin(\pi y)\sin(\pi z),
+\end{equation}
+so that $\Delta u_\star = f_\star$ and $u_\star \equiv 0$ on $\partial\Omega$.
+This choice provides a closed-form reference for measuring the
+discretisation error.
+
+\begin{remark}[Sign convention]
+The implementation writes the equation as $\Delta u = f$ with $f =
+-3\pi^2 \sin(\pi x)\sin(\pi y)\sin(\pi z)$, not the more common form
+$-\Delta u = g$.  The two are equivalent under $g=-f$.  The
+\emph{defect} computed by the code is
+$d = \Delta_h u_h - f_h$, where $\Delta_h$ denotes the discrete
+Laplacian; \emph{not} $f_h - \Delta_h u_h$.  This sign propagates
+through the multigrid update --- in particular, the prolongation
+operator subtracts (rather than adds) the coarse correction
+(\Cref{sec:prolongation}).
+\end{remark}
+
+% =============================================================================
+\section{Discretisation}\label{sec:discretisation}
+% =============================================================================
+
+\subsection{Node-based grid}
+We discretise $\overline{\Omega}$ with a uniform tensor-product grid
+\begin{equation*}
+  \bx_{ijk} = (i\,h_x,\,j\,h_y,\,k\,h_z),\quad
+  i=0,\dots,N_x-1,\ j=0,\dots,N_y-1,\ k=0,\dots,N_z-1,
+\end{equation*}
+where $N_x = n_x+1$, $N_y = n_y+1$, $N_z = n_z+1$ and $h_x = 1/n_x$,
+$h_y = 1/n_y$, $h_z = 1/n_z$.  The user specifies the cell counts $n_x$,
+$n_y$, $n_z$ in the input file; the corresponding number of
+\emph{grid points} per axis is one larger.  The boundary nodes $i\in\{0,N_x-1\}$
+(and similarly $j,k$) are Dirichlet nodes and are not unknowns of the
+linear system.
+
+\subsection{Seven-point Laplacian}
+We approximate $\Delta u$ by the standard second-order central
+difference
+\begin{equation}\label{eq:laplacian-7pt}
+  \Delta_h u_{ijk} \;\coloneqq\;
+  \frac{u_{i+1,j,k}-2u_{ijk}+u_{i-1,j,k}}{h_x^2}
+  +\frac{u_{i,j+1,k}-2u_{ijk}+u_{i,j-1,k}}{h_y^2}
+  +\frac{u_{i,j,k+1}-2u_{ijk}+u_{i,j,k-1}}{h_z^2}.
+\end{equation}
+Taylor expansion around $\bx_{ijk}$ shows that, for $u\in C^4(\overline\Omega)$,
+the truncation error satisfies
+\begin{equation}\label{eq:truncation}
+  \Delta_h u(\bx_{ijk}) - \Delta u(\bx_{ijk})
+  = \tfrac{h_x^2}{12} \partial_x^4 u + \tfrac{h_y^2}{12}\partial_y^4 u
+  + \tfrac{h_z^2}{12}\partial_z^4 u + \bigO(h^4),
+\end{equation}
+so the scheme is second-order consistent in $h\coloneqq\max(h_x,h_y,h_z)$
+\cite[Ch.~2]{leveque2007finite}.  Combined with discrete-maximum-principle
+stability, this yields second-order convergence in the $\ell^\infty$ norm,
+$\norm{u_h - u}_{\ell^\infty(\Omega_h)} = \bigO(h^2)$
+\cite[Ch.~2--3]{leveque2007finite}.
+
+The discrete system $A_h u_h = f_h$ has a symmetric, negative-definite,
+$M$-matrix structure with seven non-zeros per interior row and is
+the standard model problem in the multigrid literature
+\cite[\S2.1]{trottenberg2001multigrid}.
+
+\subsection{Index convention and storage}
+The code stores the unknowns in a flat array with the linear index
+\begin{equation*}
+  \mathrm{idx}(i,j,k) \;=\; i + (j + k\,N_y)\,N_x,
+\end{equation*}
+so that $i$ is the unit-stride (innermost) axis.  This is the
+\texttt{gf\_indx\_3d} macro in \texttt{gf.h}.  Each rank holds a
+contiguous tile of grid points plus a single layer of \emph{ghost} cells
+on every face that is shared with another rank
+(\Cref{fig:ghost}).  The ghost width is fixed at $g_s = 1$,
+matching the seven-point stencil.
+
+% =============================================================================
+\section{Stationary relaxation methods}\label{sec:relaxation}
+% =============================================================================
+
+Before turning to multigrid, we recall the building blocks the smoother
+is composed of.  Let $A_h u_h = f_h$ be the discrete system from
+\eqref{eq:laplacian-7pt}, with $A_h = D - L - U$ where $D$ is the diagonal
+and $L$, $U$ are the strict lower/upper-triangular parts.
+
+\subsection{Jacobi, Gauss--Seidel, SOR}
+The \emph{Gauss--Seidel} (GS) iteration is
+$u^{(m+1)} = (D-L)^{-1}(U u^{(m)} + f_h)$, i.e. each unknown is updated
+in turn using the most recent values of its neighbours.  The
+\emph{successive over-relaxation} (SOR) method introduces a relaxation
+parameter $\omega>0$:
+\begin{equation}\label{eq:sor}
+  u^{(m+1)}_{ijk}
+  = (1-\omega)\,u^{(m)}_{ijk} + \omega\,\widetilde u_{ijk},\qquad
+  \widetilde u_{ijk} = \frac{f_{ijk} - \sum_{(p,q,r)\ne(0,0,0)} a_{ijk;pqr}
+  u_{i+p,j+q,k+r}}{a_{ijk;000}},
+\end{equation}
+where $\widetilde u_{ijk}$ is the standard GS update.  For SPD matrices,
+SOR converges if and only if $0<\omega<2$ \cite[Thm.~10.1.2]{golub2013matrix};
+$\omega=1$ recovers Gauss--Seidel.
+
+For the constant-coefficient five-point Laplacian on an $n\times n$
+square grid, Young's classical analysis yields the optimal parameter
+\begin{equation}\label{eq:omega-opt}
+  \omega_{\mathrm{opt}} = \frac{2}{1 + \sin(\pi h)} \;\approx\; 2 - 2\pi h
+  \quad \text{as } h\to 0,
+\end{equation}
+with asymptotic spectral radius $\spr_{\mathrm{opt}} = \omega_{\mathrm{opt}}
+- 1 \approx 1 - 2\pi h$, i.e.\ a convergence rate of $\bigO(h)$ rather than
+the $\bigO(h^2)$ rate of plain Gauss--Seidel
+\cite[Ch.~5]{young1971iterative},
+\cite[\S4.2.2]{saad2003iterative},
+\cite[Ch.~3]{varga2009matrix}.  In three dimensions the analogous
+formula has the same leading behaviour
+\cite[\S2.5]{trottenberg2001multigrid}.
+
+\subsection{Smoothing property of relaxation}\label{sec:smoothing-property}
+The reason classical relaxation appears in multigrid is not its global
+convergence rate but its \emph{smoothing} property: the high-frequency
+components of the error are damped quickly even when the low-frequency
+components are not.  For the discrete Laplacian, expand the error
+$e^{(m)} = u_h - u^{(m)}$ in the Fourier basis.  The Jacobi/GS/SOR
+amplification factor depends on the wavenumber $\theta$.  For
+weighted Jacobi and Gauss--Seidel applied to the model problem, the
+smoothing factor (the worst amplification factor over high-frequency
+modes $\theta\in[\pi/2,\pi]$) is bounded away from 1 uniformly in $h$
+\cite[\S2.1]{trottenberg2001multigrid},
+\cite[\S3.2]{briggs2000multigrid}.  This is the property that makes
+multigrid work.
+
+\subsection{Red-black ordering}\label{sec:redblack}
+The Gauss--Seidel iteration is sequential as written, because updating
+$u_{ijk}$ requires the already-updated $u_{i-1,j,k}$, $u_{i,j-1,k}$,
+$u_{i,j,k-1}$.  For the seven-point stencil this dependency disappears
+under a \emph{red-black} (or \emph{checkerboard}) ordering: we colour
+each grid point with parity $c(i,j,k)= (i+j+k)\bmod 2$, then update
+all red points first (every red neighbour stencil consists only of
+black points, which are not being updated), exchange ghosts, and
+finally update all black points.  The resulting iteration is a
+genuine Gauss--Seidel iteration with respect to the red-black
+permutation, but each half-sweep is fully parallel.  For the
+five-point Laplacian, red-black GS has smoothing factor exactly $1/4$
+in two dimensions, independent of $h$
+\cite[\S3.2]{trottenberg2001multigrid}; the three-dimensional
+seven-point case has the same qualitative behaviour.
+
+% =============================================================================
+\section{Geometric multigrid}\label{sec:multigrid}
+% =============================================================================
+
+This section condenses the parts of the multigrid story that are needed to
+read the code; the canonical references are
+\cite{briggs2000multigrid,trottenberg2001multigrid,hackbusch1985multi}.
+
+\subsection{Two-grid idea}
+Suppose we have a fine grid $\Omega_h$ with operator $A_h$ and a coarse
+grid $\Omega_H$ (with $H=2h$) with operator $A_H$, plus
+\begin{itemize}[nosep]
+  \item a \emph{restriction} $R_h^H : \Omega_h \to \Omega_H$, transferring
+    fine-grid functions to the coarse grid;
+  \item a \emph{prolongation} $P_H^h : \Omega_H \to \Omega_h$, transferring
+    coarse-grid functions to the fine grid.
+\end{itemize}
+After a few sweeps of relaxation on $A_h u_h = f_h$, the error
+$e = u_h^\star - u_h$ is smooth and therefore well representable on
+$\Omega_H$.  The two-grid cycle reads:
+\begin{enumerate}[leftmargin=*,nosep]
+  \item Pre-smooth: $u_h \leftarrow S_h^{\nu_1}(u_h, f_h)$.
+  \item Compute the defect $d_h = A_h u_h - f_h$ (note the sign convention
+    of \Cref{sec:problem}).
+  \item Restrict: $d_H = R_h^H d_h$.
+  \item Solve the coarse defect equation
+    $A_H e_H = d_H$ (exactly or approximately).
+  \item Prolong and \emph{subtract} the correction:
+    $u_h \leftarrow u_h - P_H^h e_H$.
+  \item Post-smooth: $u_h \leftarrow S_h^{\nu_2}(u_h, f_h)$.
+\end{enumerate}
+
+\subsection{V-cycle and W-cycle}
+Recursively replacing the exact solve in step 4 with $\gamma$ applications
+of the same cycle defines the \emph{multigrid cycle of index $\gamma$}:
+$\gamma=1$ is a V-cycle, $\gamma=2$ is a W-cycle
+\cite[Fig.~3.1]{trottenberg2001multigrid}.  In the present code the
+parameter \texttt{subcycles} controls $\gamma$ at every level (see
+\Cref{sec:vcycle-impl}).
+
+\begin{theorem}[Multigrid optimality, informal]\label{thm:mg}
+For the discrete Poisson problem with full-weighting restriction,
+linear interpolation, and a sufficient number of relaxation sweeps,
+the V-cycle reduces the error by a factor that is bounded away from 1
+\emph{uniformly in $h$}.  The cost of one V-cycle is $\bigO(N)$ where
+$N$ is the number of fine-grid unknowns, so the total cost of obtaining
+a discretisation-accurate solution is $\bigO(N)$.
+\end{theorem}
+
+A precise statement and proof under the appropriate regularity and
+approximation hypotheses is given in
+\cite[Ch.~6]{hackbusch1985multi} and \cite[Ch.~7]{trottenberg2001multigrid}.
+
+\subsection{Transfer operators on a node-based grid}\label{sec:transfer}
+\paragraph{Restriction.}  We use \emph{full-weighting} restriction with the
+$3\times 3\times 3$ stencil
+\begin{equation}\label{eq:full-weighting}
+  (R_h^H d)_{IJK} = \tfrac{1}{64}\!\!
+  \sum_{p,q,r\in\{-1,0,1\}}\!\! w_{pqr}\, d_{2I+p,\,2J+q,\,2K+r},
+\end{equation}
+with weights $w_{000}=8$, $w=4$ on the six face-adjacent points,
+$w=2$ on the twelve edge-adjacent points, and $w=1$ on the eight corners
+(total weight $64$).  This is the natural generalisation to three
+dimensions of the canonical 2D full-weighting operator and is the
+standard choice for the Poisson problem
+\cite[\S3.5]{briggs2000multigrid}, \cite[\S2.3]{trottenberg2001multigrid}.
+
+\paragraph{Prolongation.}  We use \emph{trilinear} interpolation: a
+fine-grid point at parity $(p_x,p_y,p_z)\in\{0,1\}^3$ relative to its
+coarse cell is set to the average of the $2^{p_x+p_y+p_z}$ surrounding
+coarse-grid points.  Concretely, with $p_x+p_y+p_z = 0,1,2,3$
+this gives copy, two-point average, four-point average, eight-point
+average respectively.  Trilinear prolongation is the formal adjoint of
+full-weighting restriction up to a factor of 8, so the pair
+$(R_h^H, P_H^h)$ satisfies the variational property
+$P_H^h = c (R_h^H)^T$ that underlies most multigrid convergence proofs
+\cite[\S2.3.4]{trottenberg2001multigrid}.
+
+\paragraph{Injection.}  At coincident points (i.e.\ at every coarse-grid
+node, which by construction lies on the fine grid as well), the
+\emph{injection} operator simply copies the fine value.  In this code
+injection is used to seed the coarse-grid right-hand side at the
+boundary nodes, after which restriction overwrites the interior
+nodes; this avoids special-casing of the restriction stencil at
+boundary points.
+
+\subsection{Convergence rate of the model V-cycle}
+For the constant-coefficient $d$-dimensional Laplacian discretised by
+the standard $(2d{+}1)$-point stencil, with red-black Gauss--Seidel
+smoothing, full-weighting restriction, and linear (trilinear in 3D)
+interpolation, the asymptotic V-cycle convergence factor is bounded
+above by approximately $0.1$--$0.2$ depending on the number of
+pre/post-smoothing sweeps; the factor is independent of $h$
+\cite[\S4]{trottenberg2001multigrid}.  Local Fourier analysis (LFA)
+\cite[Appx.~A]{trottenberg2001multigrid} is the standard tool for
+quantifying these rates.
+
+% =============================================================================
+\section{Implementation}\label{sec:implementation}
+% =============================================================================
+
+\subsection{Source-tree layout}
+The code is layered.  From bottom to top:
+\begin{description}[style=nextline,leftmargin=2em]
+\item[\texttt{domain.\{c,h\}}] MPI Cartesian decomposition.  The
+  function \texttt{automatic\_topology} chooses the process grid
+  $(p_x,p_y,p_z)$ by greedy prime factorisation of the rank count;
+  \texttt{setup\_3d\_domain} builds the Cartesian communicator and
+  computes per-rank local extents and global offsets.
+\item[\texttt{gf.\{c,h\}}] Grid-function containers.  \texttt{struct
+  ngfs\_3d} holds the local sizes, origin, spacing, an array of
+  variable slots (\texttt{vars[]}), pre-allocated face-buffers for
+  ghost exchange, and parent/child pointers used to chain multigrid
+  levels.
+\item[\texttt{comm.\{c,h\}}] Ghost-zone synchronisation.  \texttt{sync\_var\_3d}
+  packs faces, posts non-blocking sends/receives one axis at a time,
+  and unpacks.
+\item[\texttt{gauss\_seidel.\{c,h\}}] The smoother and the defect
+  operator: \texttt{gauss\_seidel\_3d}, \texttt{calc\_defect\_3d},
+  \texttt{apply\_bc\_3d}.
+\item[\texttt{multigrid.\{c,h\}}] Hierarchy construction
+  (\texttt{ngfs\_3d\_create\_hierarchy}), transfer operators
+  (\texttt{inject\_var\_3d}, \texttt{restrict\_var\_3d},
+  \texttt{prolong\_var\_3d}), and the V-cycle driver
+  \texttt{vcycle\_3d}.
+\item[\texttt{io.\{c,h\}}] Per-rank JSON output.
+\item[\texttt{parameter.\{cc,h\}} and \texttt{toml.hpp}] TOML parameter
+  parsing.  \texttt{parameter.cc} is C++; the
+  \texttt{parse\_parameter\_file} entry point is exposed as
+  \texttt{extern "C"} so the C driver can link against it.
+\item[\texttt{driver\_multigrid.c}] The top-level program: parameter
+  parsing, grid set-up, RHS initialisation from
+  \eqref{eq:manufactured}, the outer iteration loop, error reporting,
+  and JSON output.
+\end{description}
+A small set of variable indices is fixed in \texttt{gauss\_seidel.h}:
+\texttt{VAR\_SOL = 0} (the solution $u$),
+\texttt{VAR\_RHS = 1} (the source $f$),
+\texttt{VAR\_DEF = 2} (the defect $d = \Delta_h u - f$).
+
+\subsection{MPI domain decomposition}\label{sec:domain}
+Given $P$ MPI ranks and global grid dimensions $(N_x,N_y,N_z)$, the
+function \texttt{automatic\_topology} computes a process grid
+$(p_x,p_y,p_z)$ with $p_x p_y p_z = P$ via a greedy descent on the
+prime factors of $P$, biasing each factor toward the longest current
+axis to keep tile aspect ratios close to one.  \texttt{MPI\_Cart\_create}
+produces the Cartesian communicator used everywhere downstream.  The
+periodicity flags are zero in all directions, which matches the
+Dirichlet boundary conditions; switching to periodic
+boundaries requires changing this in \texttt{setup\_3d\_domain} (see
+\Cref{sec:bc-periodic}).
+
+A face is a \emph{physical boundary} of the global domain on this rank
+when the corresponding neighbour rank does not exist
+(\texttt{lower\_x\_rank == INVALID\_RANK} and analogous).  Boundary
+conditions are applied only on those faces; faces shared with another
+rank are handled by ghost exchange.
+
+\begin{figure}[h]
+\centering
+\begin{minipage}{0.8\textwidth}
+\centering
+\begin{verbatim}
+   ghost     interior cells (owned)        ghost
+    | g | * | * | * | * | * | * | * | * | g |
+    0   1                              N-2  N-1
+   <----------- local_nx --------------->
+\end{verbatim}
+\end{minipage}
+\caption{One-dimensional view of a per-rank tile.  The width-$g_s=1$
+ghost layer on each side stores values owned by the neighbouring rank
+(or the physical boundary).  The seven-point stencil at any interior
+point reads at most one ghost cell on each axis.}\label{fig:ghost}
+\end{figure}
+
+\subsection{Smoother kernel: red-black Gauss--Seidel SOR}\label{sec:smoother-impl}
+The function \texttt{gauss\_seidel\_3d} (\texttt{gauss\_seidel.c:86}) implements
+\eqref{eq:sor} in red-black ordering with global parity
+$c(i,j,k) = (g_i+g_j+g_k)\bmod 2$, where $g_i = \mathtt{local\_i0} + i$
+is the global index of local point $i$.  Using the global parity --- not
+the local parity --- guarantees that neighbouring ranks colour
+shared-face neighbours consistently, regardless of where rank
+boundaries fall.  Each iteration consists of a red sweep, a ghost
+exchange and BC application, a black sweep, and another ghost+BC sync.
+
+The stencil coefficients in the GS update are precomputed once per
+level from $h_x,h_y,h_z$:
+\begin{align*}
+  D &= 2(h_x^2 h_y^2 + h_x^2 h_z^2 + h_y^2 h_z^2),\\
+  c_x &= h_y^2 h_z^2 / D, \quad
+  c_y = h_x^2 h_z^2 / D, \quad
+  c_z = h_x^2 h_y^2 / D, \quad
+  c_s = h_x^2 h_y^2 h_z^2 / D,
+\end{align*}
+so that
+$\widetilde u_{ijk} = c_x(u_{i\pm 1,j,k}) + c_y(u_{i,j\pm 1,k}) + c_z(u_{i,j,k\pm 1})
+- c_s f_{ijk}$.
+The SOR update \eqref{eq:sor} is then $u_{ijk} \leftarrow (1-\omega)u_{ijk}
++ \omega \widetilde u_{ijk}$.
+
+\subsection{Defect}\label{sec:defect}
+\texttt{calc\_defect\_3d} (\texttt{gauss\_seidel.c:196}) evaluates
+$d_{ijk} = (\Delta_h u)_{ijk} - f_{ijk}$ at every interior point,
+zeros it on physical boundaries (so the defect is consistent with
+Dirichlet BCs), reduces the local maximum modulus across the Cartesian
+communicator with \texttt{MPI\_Allreduce(\dots, MPI\_MAX)}, and
+synchronises the ghost layer of \texttt{VAR\_DEF} so that the
+restriction stencil can read complete data on the next call.
+
+\subsection{Hierarchy construction}\label{sec:hierarchy}
+\texttt{ngfs\_3d\_create\_hierarchy} (\texttt{multigrid.c:228}) builds
+the parent$\to$child linked list by repeatedly halving the cell counts
+in each direction and doubling the spacings.  The same Cartesian
+process grid is used at every level; coarsening reduces the per-rank
+tile but never agglomerates ranks.  Coarsening stops when either:
+\begin{enumerate}[label=(\roman*),leftmargin=*]
+  \item the cell count in any direction is odd (so exact 2:1 coarsening
+    is impossible), or
+  \item the minimum number of interior cells per rank per direction,
+    reduced across all ranks via \texttt{MPI\_Allreduce}, drops below
+    the user-supplied \texttt{min\_cells} threshold.
+\end{enumerate}
+For maximum hierarchy depth the user should choose each $n_x,n_y,n_z$
+of the form $2^p\cdot c$ with $c$ odd; the algorithm then reaches a
+coarsest grid of $c+1$ points per axis (or stops earlier on the
+\texttt{min\_cells} criterion).
+
+\subsection{Transfer operators}\label{sec:prolongation}
+The injection, restriction, and trilinear prolongation operators of
+\Cref{sec:transfer} are implemented in \texttt{inject\_var\_3d},
+\texttt{restrict\_var\_3d}, \texttt{prolong\_var\_3d}.  Two
+implementation details are worth highlighting:
+\begin{itemize}[leftmargin=*]
+  \item \emph{Boundary handling in restriction.}  The full-weighting
+    stencil is applied only at interior coarse-grid points.  Coarse
+    boundary points are first overwritten by injection from the
+    fine-grid boundary, ensuring that homogeneous Dirichlet data on
+    the fine grid carries through unchanged.
+
+  \item \emph{Sign of the prolongation.}  Because the code's defect
+    convention is $d=\Delta_h u - f$ rather than $f - \Delta_h u$, the
+    coarse correction $e_H$ is the solution of $A_H e_H = d_H$
+    (\emph{not} $A_H e_H = -d_H$), and the fine-grid update is
+    $u_h \leftarrow u_h - P_H^h e_H$.  This is why
+    \texttt{prolong\_var\_3d} performs \verb|pval[idx] -= update|.
+    Physical boundary fine-grid points are skipped to preserve
+    the Dirichlet data set by \texttt{apply\_bc\_3d}.
+
+  \item \emph{Ghost requirement.}  The trilinear stencil reads up to
+    one neighbouring coarse-grid point in each direction, so the
+    coarse correction's ghost layer must be valid before
+    \texttt{prolong\_var\_3d} is called.  In practice this is
+    guaranteed because the smoother (which is the last operation on
+    the coarse level before the recursion returns) leaves the ghost
+    layer of \texttt{VAR\_SOL} synchronised.
+\end{itemize}
+
+\subsection{V-cycle}\label{sec:vcycle-impl}
+\texttt{vcycle\_3d} (\texttt{multigrid.c:711}) implements
+\Cref{alg:vcycle}.
+
+\begin{lstlisting}[caption={V-cycle pseudocode (matches
+\texttt{vcycle\_3d}).},label=alg:vcycle]
+vcycle_3d(level, n_smooth, omega, tol, subcycles):
+    gauss_seidel_3d(level, n_smooth, omega)         // pre-smoothing
+    norm = calc_defect_3d(level)                    // VAR_DEF, ghosts synced
+    if level.child != NULL and norm > tol:
+        for it = 1 .. subcycles:
+            zero level.child.VAR_SOL; apply_bc_3d
+            inject_var_3d(level, VAR_DEF, child, VAR_RHS)
+            restrict_var_3d(level, VAR_DEF, child, VAR_RHS)
+            vcycle_3d(child, n_smooth, omega, tol, subcycles)
+            sync_var_3d(level, VAR_SOL)             // ghosts of fine SOL
+            gauss_seidel_3d(level, n_smooth, omega) // post-smoothing
+            gauss_seidel_3d(level, n_smooth, 1.0)   // extra plain GS pass
+            norm = calc_defect_3d(level)
+            if norm <= tol: break
+    if level.parent != NULL:
+        prolong_var_3d(level, VAR_SOL, level.parent, VAR_SOL)  // u -= e
+    return norm
+\end{lstlisting}
+
+With \texttt{subcycles}~$=1$ this is the standard V-cycle.  With
+\texttt{subcycles}~$>1$ the inner loop performs additional coarse-grid
+visits per level until the defect tolerance is met or the budget is
+exhausted, producing a behaviour intermediate between a V-cycle and a
+W-cycle.
+
+\subsection{Driver loop}
+The driver in \texttt{driver\_multigrid.c} reads the TOML file,
+allocates the root grid with three variable slots, optionally builds
+the hierarchy, initialises \texttt{VAR\_RHS} from
+\eqref{eq:manufactured} and \texttt{VAR\_SOL}~$=0$, then iterates up to
+\texttt{n\_iters} times.  Each iteration is either one V-cycle (if
+\texttt{multigrid = true}) or one call to the smoother followed by a
+defect computation; the loop terminates early if
+$\norm{d}_{\Linf} < \texttt{tol}$.  After convergence the driver
+computes $\norm{u_h - u_\star}_{\Linf}$ on the local interior, reduces
+across ranks with \texttt{MPI\_MAX}, and prints the result.  Per-rank
+JSON output is written by \texttt{output\_3d\_gf}.
+
+% =============================================================================
+\section{User-selectable parameters}\label{sec:parameters}
+% =============================================================================
+
+The driver takes a single command-line argument: the path to a TOML
+parameter file.  An example (\texttt{multigrid.toml}) is shipped with
+the code:
+\begin{lstlisting}[language={},caption={Sample input file.}]
+[grid]
+nx_cells = 256
+ny_cells = 256
+nz_cells = 256
+
+[solver]
+multigrid = true
+omega     = 1.5
+n_smooth  = 100
+n_iters   = 20
+tol       = 1.0e-9
+subcycles = 1
+min_cells = 4
+\end{lstlisting}
+
+\subsection{Parameter reference}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}llp{0.62\linewidth}@{}}
+\toprule
+Section / key & Type & Meaning \\
+\midrule
+\verb|[grid].nx_cells| & positive int & Cells in $x$; grid points $= n_x{+}1$.  For deepest coarsening, prefer $n_x = 2^p\cdot c$ with $c$ odd. \\
+\verb|[grid].ny_cells| & positive int & Cells in $y$. \\
+\verb|[grid].nz_cells| & positive int & Cells in $z$. \\
+\addlinespace
+\verb|[solver].multigrid| & bool & \texttt{true}: V-cycle multigrid.  \texttt{false}: single-grid red-black Gauss--Seidel SOR. \\
+\verb|[solver].omega|     & float $\in(0,2)$ & SOR relaxation parameter.  $\omega=1$ is plain Gauss--Seidel; $1<\omega<2$ is over-relaxation.  See \Cref{sec:tuning}. \\
+\verb|[solver].n_smooth|  & positive int & Number of red-black GS iterations per smoothing call. \\
+\verb|[solver].n_iters|   & positive int & Maximum number of outer iterations (V-cycles, or single-grid GS calls). \\
+\verb|[solver].tol|       & non-negative float & Termination threshold on $\norm{d}_{\Linf}$. \\
+\verb|[solver].subcycles| & positive int & (multigrid only) Maximum coarse-grid visits per level.  $1$ = V-cycle, $>1$ behaves like a partial W-cycle. \\
+\verb|[solver].min_cells| & positive int & (multigrid only) Minimum interior cells per rank per direction.  Coarsening stops below this. \\
+\bottomrule
+\end{tabular}
+\caption{Input parameters.}
+\end{table}
+
+\subsection{Practical tuning guidance}\label{sec:tuning}
+\paragraph{$\omega$ (SOR parameter).}
+For multigrid, the smoother only needs to damp high frequencies; a
+common and robust choice is $\omega \in [1.0, 1.3]$ for red-black GS.
+Higher values (closer to the single-grid optimum
+\eqref{eq:omega-opt}) sometimes accelerate the smoother but can erode
+the smoothing factor.  When running in single-grid mode, choose
+$\omega$ near $\omega_{\mathrm{opt}}$; for $h \approx 1/256$ this gives
+$\omega \approx 1.97$.  The shipped default $\omega=1.5$ is a
+compromise that works for both modes on the example problem.
+
+\paragraph{\texttt{n\_smooth}.}
+Multigrid theory predicts that a small number of smoothing sweeps
+($\nu_1 = \nu_2 = 1$ or $2$) is sufficient
+\cite[\S4]{trottenberg2001multigrid}.  In practice, on a parallel
+machine where ghost exchanges have non-trivial latency, larger
+\texttt{n\_smooth} (between $4$ and the shipped $100$) can improve
+\emph{strong-scaling} efficiency by amortising the communication cost
+even though it does not change the asymptotic algorithmic complexity.
+Tune for time-to-solution, not iteration count.
+
+\paragraph{\texttt{n\_iters} and \texttt{tol}.}
+Set \texttt{tol} to the target precision (typically a small multiple of
+the discretisation error $\bigO(h^2)$) and \texttt{n\_iters} to a
+generous upper bound; the loop exits early once the tolerance is met.
+
+\paragraph{\texttt{subcycles}.}
+Leave this at $1$ unless you observe that V-cycles plateau before the
+defect drops to \texttt{tol}; in that case increasing it to $2$
+behaves like a W-cycle on the affected levels and is the cheapest
+remedy.
+
+\paragraph{\texttt{min\_cells}.}
+A small value (the default $4$) lets the hierarchy go as deep as
+the grid allows.  On a very large rank count, $4$ may be too
+aggressive: the coarsest level becomes communication-bound because each
+rank holds only a handful of cells.  In that regime, $8$ or $16$ is
+often a better choice.  At present the code does not implement
+rank-agglomeration on coarse grids, which is the more sophisticated
+remedy \cite[\S6.3]{trottenberg2001multigrid}.
+
+\paragraph{\texttt{nx\_cells}, \texttt{ny\_cells}, \texttt{nz\_cells}.}
+Powers of two maximise hierarchy depth.  Cell counts that are not
+powers of two are accepted but bottom out at the first odd factor.
+
+% =============================================================================
+\section{Extending the code}\label{sec:extension}
+% =============================================================================
+
+The grid hierarchy, the smoother coefficients (which are computed per
+level from $h_x,h_y,h_z$), the defect, and the transfer operators are
+\emph{independent of} the right-hand side and depend on the boundary
+conditions only through the function \texttt{apply\_bc\_3d} and the
+boundary handling inside \texttt{prolong\_var\_3d}.  Modifications are
+therefore highly localised.
+
+\subsection{Different right-hand sides}\label{sec:other-source}
+To solve $\Delta u = f$ for a different $f$ on the same domain with the
+same homogeneous Dirichlet condition, edit only the RHS-init loop in
+\texttt{driver\_multigrid.c} (lines 125--139):
+\begin{lstlisting}
+for (int64_t k = 0; k < gfs.nz; k++) {
+    const double z = gfs.z0 + k * gfs.dz;
+    for (int64_t j = 0; j < gfs.ny; j++) {
+        const double y = gfs.y0 + j * gfs.dy;
+        for (int64_t i = 0; i < gfs.nx; i++) {
+            const double  x   = gfs.x0 + i * gfs.dx;
+            const int64_t idx = gf_indx_3d(&gfs, i, j, k);
+            rhs[idx] = my_f(x, y, z);   // <-- replace with new source
+            sol[idx] = 0.0;
+        }
+    }
+}
+\end{lstlisting}
+The closed-form-error block (lines 168--185) should be removed unless a
+manufactured solution is available.  Nothing else needs to change.
+
+A cleaner refactor is to introduce a function pointer
+\verb|double (*f_rhs)(double,double,double)| (and optionally
+\verb|double (*u_exact)(...)|) that the driver dispatches on.  This is a
+recommended student exercise.
+
+\subsection{Inhomogeneous Dirichlet, $u = g$ on $\partial\Omega$}\label{sec:bc-dirichlet}
+The function \texttt{apply\_bc\_3d} (\texttt{gauss\_seidel.c:21})
+currently writes $0$ on every physical-boundary face.  To enforce $u=g$,
+replace those writes with the value of $g$ at the corresponding global
+coordinate, e.g.
+\begin{lstlisting}
+if (gfs->domain.lower_x_rank == INVALID_RANK)
+    for (int k = 0; k < nz; k++)
+        for (int j = 0; j < ny; j++) {
+            const double y = gfs->y0 + j * gfs->dy;
+            const double z = gfs->z0 + k * gfs->dz;
+            v[gf_indx_3d(gfs, 0, j, k)] = g_lower_x(y, z);
+        }
+\end{lstlisting}
+\textbf{Crucially:} only the \emph{fine grid} requires inhomogeneous
+Dirichlet data.  On coarser levels the unknown is the
+\emph{correction} $e_H$, whose boundary condition is homogeneous
+($e=0$ on $\partial\Omega$) regardless of the original problem.  The
+code already enforces this implicitly: \texttt{vcycle\_3d} zeroes the
+child's \texttt{VAR\_SOL} before recursion, and
+\texttt{prolong\_var\_3d} skips physical boundary points so the fine
+boundary values are preserved across coarse-grid corrections.  The
+recommended pattern is therefore
+\begin{itemize}[leftmargin=*,nosep]
+  \item add a function \texttt{apply\_bc\_3d\_inhomog} that writes
+    $g$ on physical boundaries and call it once for the
+    \emph{root}-level \texttt{VAR\_SOL} during initialisation;
+  \item leave the existing \texttt{apply\_bc\_3d} (with
+    homogeneous values) in place where it is invoked by the smoother
+    and the V-cycle.
+\end{itemize}
+
+\subsection{Neumann, $\partial u/\partial n = q$ on $\partial\Omega$}\label{sec:bc-neumann}
+Neumann boundary conditions are imposed at the discrete level by
+introducing \emph{ghost rows} just outside the physical domain and
+setting them so that the centred difference of the normal derivative
+matches $q$.  For the lower-$x$ boundary this gives
+\begin{equation}\label{eq:neumann-ghost}
+  \frac{u_{1,j,k} - u_{-1,j,k}}{2 h_x} = q(\bx_{0,j,k})
+  \qquad\Longrightarrow\qquad
+  u_{-1,j,k} = u_{1,j,k} - 2 h_x q(\bx_{0,j,k}).
+\end{equation}
+In the present code the ``ghost row outside the physical boundary'' is
+exactly the cell at local index $i=0$ when the rank is on the lower-$x$
+face (because that face has no MPI neighbour to fill the layer).
+Implementing Neumann therefore amounts to:
+\begin{enumerate}[leftmargin=*,nosep]
+  \item In \texttt{apply\_bc\_3d}, instead of zeroing the boundary face,
+    reflect the interior with the offset above, e.g.\
+    \verb|v[i=0] = v[i=2] - 2*hx*q(...)| at lower-$x$, and the
+    symmetric form at upper-$x$.
+  \item Treat the boundary points as \emph{unknowns}: extend the
+    sweep range in \texttt{gauss\_seidel\_3d} and
+    \texttt{calc\_defect\_3d} to include $i=0$ and $i=N_x{-}1$ on
+    physical-boundary ranks.  This requires modifying the loop
+    bounds; the simplest approach is to keep the interior-only
+    sweeps but follow them by an explicit ghost-row update via
+    \eqref{eq:neumann-ghost} that mimics the boundary equation.
+  \item Remove the corresponding \verb|continue| guards in
+    \texttt{prolong\_var\_3d}: with Neumann BCs the boundary
+    correction is non-zero.
+\end{enumerate}
+Pure Neumann conditions render the operator singular up to a constant
+(the constant function lies in the null space).  In that case the
+solution is determined only up to an additive constant, and the
+discrete RHS must satisfy the discrete compatibility condition
+$\int f\, d\bx = \int q\, dS$, i.e.\ the sum of the discrete RHS plus
+the boundary flux contributions must vanish; otherwise the system has
+no solution.  In practice one (i) projects the RHS onto the
+mean-zero subspace each iteration, and (ii) anchors the solution by
+fixing $u$ at one node, or by projecting $u$ onto the mean-zero
+subspace each iteration as well.  See \cite[\S6.4]{briggs2000multigrid}
+and \cite[\S5.6]{trottenberg2001multigrid} for a thorough discussion.
+
+\subsection{Robin, $\alpha u + \beta \partial u/\partial n = r$}\label{sec:bc-robin}
+Robin (or third-kind) boundary conditions interpolate between Dirichlet
+($\beta=0$) and Neumann ($\alpha=0$) and are implemented by combining
+the two ghost-row strategies above.  At the lower-$x$ face,
+\begin{equation*}
+  \alpha\, u_{0,j,k} + \beta\, \frac{u_{1,j,k} - u_{-1,j,k}}{2h_x}
+  = r(\bx_{0,j,k}),
+\end{equation*}
+which solves for the ghost value
+\begin{equation}\label{eq:robin-ghost}
+  u_{-1,j,k} \;=\; u_{1,j,k} + \frac{2h_x}{\beta}\!\left[
+    \alpha\, u_{0,j,k} - r(\bx_{0,j,k}) \right].
+\end{equation}
+Because $u_{-1,j,k}$ depends on $u_{0,j,k}$, the boundary equation is
+typically eliminated by substituting \eqref{eq:robin-ghost} into the
+seven-point stencil at $i=0$ and absorbing the $\alpha u_{0,j,k}$ term
+into the diagonal.  Concretely, the modified equation for the
+lower-$x$ boundary point becomes
+\begin{equation}\label{eq:robin-eqn}
+  \frac{2 u_{1,j,k} - 2 u_{0,j,k} - \tfrac{2h_x \alpha}{\beta} u_{0,j,k}
+        + \tfrac{2h_x}{\beta} r}{h_x^2}
+  + (\text{$y$ and $z$ second differences})
+  = f_{0,j,k},
+\end{equation}
+i.e.\ a modified diagonal coefficient $-2/h_x^2 - 2\alpha/(h_x\beta)$ and
+an additional contribution to the RHS of $-2 r / (h_x \beta)$.
+
+In the code this is implemented by:
+\begin{enumerate}[leftmargin=*,nosep]
+\item Replacing \texttt{apply\_bc\_3d} on Robin faces with the
+  ghost-update \eqref{eq:robin-ghost}.
+\item Adding boundary-stencil branches to \texttt{gauss\_seidel\_3d}
+  and \texttt{calc\_defect\_3d} that use \eqref{eq:robin-eqn} on
+  Robin-boundary points.  A clean way to organise this is to
+  precompute, on each rank that owns a Robin face, modified
+  coefficient arrays (or a flat list of boundary-equation
+  ``corrections'') so that the inner kernels remain branch-free.
+\item Modifying \texttt{prolong\_var\_3d} to interpolate the
+  correction at boundary points (Robin corrections are non-zero on
+  the boundary).
+\end{enumerate}
+Note that on coarser levels the BC stays Robin with the \emph{same}
+$\alpha$ and $\beta$ but the homogeneous data $r=0$ for the coarse-grid
+correction, exactly as in the inhomogeneous-Dirichlet case
+(\Cref{sec:bc-dirichlet}).  Robin boundary conditions are also discussed
+in \cite[\S2.3.2]{trottenberg2001multigrid} in the multigrid context.
+
+\subsection{Periodic boundary conditions}\label{sec:bc-periodic}
+Periodicity is essentially free: it amounts to (i) flipping the
+\texttt{periods} flags passed to \texttt{MPI\_Cart\_create} in
+\texttt{setup\_3d\_domain} from $0$ to $1$ on the periodic axes (the
+ghost exchange machinery in \texttt{sync\_var\_3d} then automatically
+wraps), (ii) skipping the corresponding writes in \texttt{apply\_bc\_3d},
+and (iii) removing the boundary \verb|continue| guards in
+\texttt{prolong\_var\_3d} on the periodic axes.  Pure-periodic problems
+share the singular-operator issue with pure-Neumann and require the
+same compatibility-and-projection treatment.
+
+\subsection{Variable-coefficient or anisotropic operators}\label{sec:variable}
+For $\nabla\!\cdot\!(a(\bx)\nabla u) = f$ or strongly anisotropic
+operators ($h_x \ll h_y$), the geometric multigrid components in this
+code may degrade.  Practical extensions include:
+\begin{itemize}[leftmargin=*,nosep]
+\item rewriting the inner kernels of \texttt{gauss\_seidel\_3d} and
+  \texttt{calc\_defect\_3d} to use the new stencil (the colouring,
+  ghost exchange, and BC handling carry over unchanged);
+\item using a \emph{Galerkin} coarse operator $A_H = R_h^H A_h
+  P_H^h$ instead of re-discretising on each level
+  \cite[\S5.4]{trottenberg2001multigrid}, which requires storing the
+  operator on every level rather than just the spacings;
+\item considering algebraic multigrid (AMG) for problems where the
+  geometric coarsening hierarchy is poorly matched to the operator
+  \cite[Appx.~A]{trottenberg2001multigrid}.
+\end{itemize}
+
+% =============================================================================
+\section*{Acknowledgements and further reading}
+% =============================================================================
+The presentation here closely follows
+\cite{briggs2000multigrid,trottenberg2001multigrid}; the parallel
+considerations are standard MPI material as in
+\cite{gropp2014using}; the finite-difference background is
+\cite{leveque2007finite}.  For deeper analytical foundations of
+multigrid the reader is referred to \cite{hackbusch1985multi}.
+
+\begin{thebibliography}{99}
+
+\bibitem{brandt1977multilevel}
+A.~Brandt.
+\newblock Multi-Level Adaptive Solutions to Boundary-Value Problems.
+\newblock \emph{Mathematics of Computation}, 31(138):333--390, 1977.
+
+\bibitem{briggs2000multigrid}
+W.~L. Briggs, V.~E. Henson, and S.~F. McCormick.
+\newblock \emph{A Multigrid Tutorial}.
+\newblock SIAM, Philadelphia, 2nd edition, 2000.
+\newblock ISBN 978-0-89871-462-3.
+
+\bibitem{evans2010pde}
+L.~C. Evans.
+\newblock \emph{Partial Differential Equations}.
+\newblock American Mathematical Society, 2nd edition, 2010.
+
+\bibitem{fedorenko1964relaxation}
+R.~P. Fedorenko.
+\newblock The speed of convergence of one iterative process.
+\newblock \emph{USSR Computational Mathematics and Mathematical Physics},
+  4(3):227--235, 1964.
+
+\bibitem{golub2013matrix}
+G.~H. Golub and C.~F. Van~Loan.
+\newblock \emph{Matrix Computations}.
+\newblock Johns Hopkins University Press, 4th edition, 2013.
+
+\bibitem{gropp2014using}
+W.~Gropp, E.~Lusk, and A.~Skjellum.
+\newblock \emph{Using MPI: Portable Parallel Programming with the
+  Message-Passing Interface}.
+\newblock MIT Press, 3rd edition, 2014.
+
+\bibitem{hackbusch1985multi}
+W.~Hackbusch.
+\newblock \emph{Multi-Grid Methods and Applications}.
+\newblock Springer-Verlag, Berlin, 1985.
+
+\bibitem{leveque2007finite}
+R.~J. LeVeque.
+\newblock \emph{Finite Difference Methods for Ordinary and Partial
+  Differential Equations: Steady-State and Time-Dependent Problems}.
+\newblock SIAM, Philadelphia, 2007.
+
+\bibitem{saad2003iterative}
+Y.~Saad.
+\newblock \emph{Iterative Methods for Sparse Linear Systems}.
+\newblock SIAM, Philadelphia, 2nd edition, 2003.
+
+\bibitem{trottenberg2001multigrid}
+U.~Trottenberg, C.~W. Oosterlee, and A.~Sch{\"u}ller.
+\newblock \emph{Multigrid}.
+\newblock Academic Press, San Diego, 2001.
+
+\bibitem{varga2009matrix}
+R.~S. Varga.
+\newblock \emph{Matrix Iterative Analysis}.
+\newblock Springer, second revised and expanded edition, 2000.
+
+\bibitem{young1971iterative}
+D.~M. Young.
+\newblock \emph{Iterative Solution of Large Linear Systems}.
+\newblock Academic Press, New York, 1971.
+
+\end{thebibliography}
+
+\end{document}
