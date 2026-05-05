@@ -562,8 +562,8 @@ vcycle_3d(level, n_smooth, omega, tol, subcycles):
             restrict_var_3d(level, VAR_DEF, child, VAR_RHS)
             vcycle_3d(child, n_smooth, omega, tol, subcycles)
             sync_var_3d(level, VAR_SOL)             // ghosts of fine SOL
-            gauss_seidel_3d(level, n_smooth, omega) // post-smoothing
-            gauss_seidel_3d(level, n_smooth, 1.0)   // extra plain GS pass
+            gauss_seidel_3d(level, n_smooth, omega) // post-smooth (SOR)
+            gauss_seidel_3d(level, n_smooth, 1.0)   // post-smooth (plain GS)
             norm = calc_defect_3d(level)
             if norm <= tol: break
     if level.parent != NULL:
@@ -577,6 +577,29 @@ visits per level until the defect tolerance is met or the budget is
 exhausted, producing a behaviour intermediate between a V-cycle and a
 W-cycle.
 
+\paragraph{Why two post-smoothing passes?}\label{par:two-postsmooths}
+The post-smooth runs first an SOR pass with the user's $\omega$ and
+then a plain Gauss--Seidel pass ($\omega = 1$).  This is deliberate.
+
+When $\omega > 1$ the SOR iteration accelerates convergence on the
+slowly-varying error components but, depending on $\omega$, can have a
+\emph{worse} smoothing factor on the highest-frequency modes than plain
+Gauss--Seidel.  In the multigrid context the smoother does not need to
+converge --- it needs to leave the high-frequency error small enough
+that the coarse grid can resolve what remains.  For the seven-point
+Laplacian, red-black Gauss--Seidel achieves a smoothing factor of $1/4$
+\emph{independent of $h$} \cite[\S2.1]{trottenberg2001multigrid}; SOR
+with $\omega \neq 1$ does not necessarily share that bound.
+
+The two-pass post-smooth therefore decouples the two concerns: the SOR
+sweep is responsible for accelerating the smooth-component error, and
+the plain-GS sweep guarantees a robust smoothing factor on the
+high-frequency component before the defect is recomputed and the cycle
+either terminates or returns to the parent.  The cost is one extra
+\texttt{n\_smooth} sweep per subcycle, which is small compared to the
+$\bigO(N)$ work of the V-cycle as a whole and is the price of the code
+tolerating any user-supplied $\omega \in (0,2)$.
+
 \subsection{Driver loop}
 The driver in \texttt{driver\_multigrid.c} reads the TOML file,
 allocates the root grid with three variable slots, optionally builds
@@ -589,6 +612,78 @@ $\norm{d}_{\Linf} < \texttt{tol}$.  After convergence the driver
 computes $\norm{u_h - u_\star}_{\Linf}$ on the local interior, reduces
 across ranks with \texttt{MPI\_MAX}, and prints the result.  Per-rank
 JSON output is written by \texttt{output\_3d\_gf}.
+
+% =============================================================================
+\section{Building and running the code}\label{sec:build}
+% =============================================================================
+
+The build is CMake-driven and strictly out-of-tree: every object file,
+library, executable, and test artefact lands under a user-chosen
+\emph{build directory}, never in the \texttt{src/} tree.  The
+top-level \texttt{CMakeLists.txt} lives in the project root and pulls
+in \texttt{src/} via \verb|add_subdirectory|, so the typical commands
+are run from the project root.
+
+\subsection{Two build modes}\label{sec:build-modes}
+The configuration is governed by two options.  The first selects what
+to build, the second adjusts the compile flags:
+
+\begin{description}[leftmargin=3em,style=nextline]
+\item[\texttt{BUILD\_TESTING}] (default \texttt{OFF})
+  When \texttt{OFF}, only the driver and its supporting libraries are
+  built; CTest is not enabled.  Set it explicitly to \texttt{ON} for
+  the configuration that the test suite expects.
+
+\item[\texttt{MULTIGRID\_FAST\_MATH}] (auto-default)
+  Adds \texttt{-ffast-math} to the compile flags.  The default is
+  auto-selected from \texttt{BUILD\_TESTING}:
+  \texttt{ON} when \texttt{BUILD\_TESTING=OFF} (full speed for
+  production runs), and \texttt{OFF} when \texttt{BUILD\_TESTING=ON}
+  (strict IEEE arithmetic so the convergence test in
+  \Cref{sec:tuning} measures the true discretisation error rather
+  than compiler reassociations).  Either default can be overridden
+  on the \texttt{cmake} command line.
+\end{description}
+
+The configure-time status print
+(\verb|-- BUILD_TESTING = ...|, \verb|-- MULTIGRID_FAST_MATH = ...|)
+makes the resolved choice unmissable.
+
+\subsection{Production workflow}\label{sec:build-prod}
+\begin{lstlisting}[language=bash]
+# from the project root
+cmake -B build                                 # BUILD_TESTING=OFF, FAST_MATH=ON
+cmake --build build -j
+mpirun -np <N> build/src/driver_multigrid <params.toml>
+\end{lstlisting}
+
+\subsection{Test workflow}\label{sec:build-test}
+\begin{lstlisting}[language=bash]
+cmake -B build-test -DBUILD_TESTING=ON         # FAST_MATH=OFF auto
+cmake --build build-test -j
+ctest --test-dir build-test --output-on-failure
+\end{lstlisting}
+
+The CTest entries are labelled, so subsets can be run independently:
+\verb|ctest -L operator| runs only the six operator-level unit tests
+(domain decomposition, hierarchy construction, injection,
+restriction, prolongation), and \verb|ctest -L end_to_end| runs only
+the parser-hardening regression and the second-order-convergence
+test described in \Cref{sec:tuning}.
+
+\paragraph{Note.}
+Running \verb|ctest --test-dir build| against a tree configured
+without \verb|-DBUILD_TESTING=ON| reports
+\texttt{No tests were found!} -- the test binaries and CTest
+registrations are only generated when the option is set at configure
+time.  Use a dedicated build directory (\texttt{build-test/} above)
+or re-configure the existing tree with the option enabled.
+
+\subsection{Cleaning}
+\begin{lstlisting}[language=bash]
+cmake --build build --target clean   # remove generated objects/binaries
+rm -rf build                         # full reset, including test artefacts
+\end{lstlisting}
 
 % =============================================================================
 \section{User-selectable parameters}\label{sec:parameters}

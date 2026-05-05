@@ -60,7 +60,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
      * X-DIRECTION SYNCHRONIZATION
      * ========================================================= */
 
-    if (lower_x_rank > -1)
+    if (lower_x_rank != INVALID_RANK)
     {
         for (int j = 0; j < ny; j++)
         {
@@ -77,7 +77,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
         num_requests++;
     }
 
-    if (upper_x_rank > -1)
+    if (upper_x_rank != INVALID_RANK)
     {
         for (int j = 0; j < ny; j++)
         {
@@ -97,7 +97,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
     assert(num_requests <= 2);
     MPI_Waitall(num_requests, recv_requests, MPI_STATUSES_IGNORE);
 
-    if (lower_x_rank > -1)
+    if (lower_x_rank != INVALID_RANK)
     {
         for (int j = 0; j < ny; j++)
         {
@@ -109,7 +109,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
         }
     }
 
-    if (upper_x_rank > -1)
+    if (upper_x_rank != INVALID_RANK)
     {
         for (int j = 0; j < ny; j++)
         {
@@ -129,7 +129,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
      * ========================================================= */
 
     /* Pack and Send to Lower Y (Bottom) */
-    if (lower_y_rank > -1)
+    if (lower_y_rank != INVALID_RANK)
     {
         for (int j = 0; j < gs; j++)
         {
@@ -148,7 +148,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
     }
 
     /* Pack and Send to Upper Y (Top) */
-    if (upper_y_rank > -1)
+    if (upper_y_rank != INVALID_RANK)
     {
         for (int j = 0; j < gs; j++)
         {
@@ -170,7 +170,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
     MPI_Waitall(num_requests, recv_requests, MPI_STATUSES_IGNORE);
 
     /* Unpack Lower Y */
-    if (lower_y_rank > -1)
+    if (lower_y_rank != INVALID_RANK)
     {
         for (int j = 0; j < gs; j++)
         {
@@ -185,7 +185,7 @@ void sync_var_2d(struct ngfs_2d *gfs, int var)
     }
 
     /* Unpack Upper Y */
-    if (upper_y_rank > -1)
+    if (upper_y_rank != INVALID_RANK)
     {
         for (int j = 0; j < gs; j++)
         {
@@ -304,7 +304,7 @@ static void exchange_direction(double *val, int64_t nx, int64_t ny,
     int n_req = 0;
 
     // 1. Pack and Start Sends/Recvs
-    if (rank_lower > -1)
+    if (rank_lower != INVALID_RANK)
     {
         transfer_data(val, buf_send_lower, box_send_lower, nx, ny, MODE_PACK);
         MPI_Isend(buf_send_lower, buff_size, MPI_DOUBLE, rank_lower, 0,
@@ -314,7 +314,7 @@ static void exchange_direction(double *val, int64_t nx, int64_t ny,
         n_req++;
     }
 
-    if (rank_upper > -1)
+    if (rank_upper != INVALID_RANK)
     {
         transfer_data(val, buf_send_upper, box_send_upper, nx, ny, MODE_PACK);
         MPI_Isend(buf_send_upper, buff_size, MPI_DOUBLE, rank_upper, 0,
@@ -328,12 +328,12 @@ static void exchange_direction(double *val, int64_t nx, int64_t ny,
     MPI_Waitall(n_req, recv_reqs, MPI_STATUSES_IGNORE);
 
     // 3. Unpack received data
-    if (rank_lower > -1)
+    if (rank_lower != INVALID_RANK)
     {
         transfer_data(val, buf_recv_lower, box_recv_lower, nx, ny, MODE_UNPACK);
     }
 
-    if (rank_upper > -1)
+    if (rank_upper != INVALID_RANK)
     {
         transfer_data(val, buf_recv_upper, box_recv_upper, nx, ny, MODE_UNPACK);
     }
