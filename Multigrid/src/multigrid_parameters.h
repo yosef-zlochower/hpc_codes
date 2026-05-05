@@ -18,6 +18,10 @@
 
 #include <stdint.h>
 
+/* Maximum length of a problem-preset name (including NUL).
+ * 64 is generous: the longest registered preset is currently 32 chars. */
+#define PARAM_PROBLEM_NAME_MAX 64
+
 struct param_st
 {
     int64_t global_nx_cells; /* number of cells in x; grid points = cells + 1 */
@@ -30,6 +34,10 @@ struct param_st
     int     min_cells;     /* multigrid only */
     double  tol;
     int     use_multigrid; /* 1 = V-cycle multigrid, 0 = Gauss-Seidel */
+    char    problem_name[PARAM_PROBLEM_NAME_MAX]; /* problem preset key,
+                                                   * defaults to
+                                                   * "manufactured_dirichlet_homog"
+                                                   * when [problem] is absent */
 };
 
 /* parse_parameter_file is callable from C and C++.  In C++ the

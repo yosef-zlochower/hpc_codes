@@ -81,6 +81,7 @@ int ngfs_3d_allocate(int nvars, struct ngfs_3d *ptr)
 
     ptr->parent = NULL;
     ptr->child  = NULL;
+    ptr->bc     = NULL;
 
     return 0;
 }
@@ -175,6 +176,15 @@ int ngfs_3d_deallocate(struct ngfs_3d *ptr)
     if (ptr->child) {
         ngfs_3d_free(ptr->child);
         ptr->child = NULL;
+    }
+
+    /* Per-level BC spec (set either by the driver on the root or by
+     * ngfs_3d_create_child via bc_spec_homogenize on coarser levels).
+     * NULL is a valid state — falls through to "homogeneous Dirichlet
+     * on every face" downstream. */
+    if (ptr->bc) {
+        free(ptr->bc);
+        ptr->bc = NULL;
     }
 
     /* Idempotent: nothing to free if allocate was never called or

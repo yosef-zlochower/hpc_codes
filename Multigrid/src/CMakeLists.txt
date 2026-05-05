@@ -23,6 +23,9 @@ add_library(multigrid_solver STATIC
     multigrid.c
     gauss_seidel.c
     io.c
+    bc.c
+    problem_registry.c
+    problem_helpers.c
 )
 
 target_link_libraries(multigrid_solver PUBLIC MPI::MPI_C m)

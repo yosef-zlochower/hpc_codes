@@ -5,7 +5,7 @@
 #include "io.h"
 #include "multigrid.h"
 #include "multigrid_parameters.h"
-#include <math.h>
+#include "problem.h"
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +45,15 @@ int main(int argc, char **argv)
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
+    /* ---- Resolve the problem preset ---- */
+    const struct problem_t *problem = problem_lookup(param.problem_name);
+    if (!problem)
+    {
+        if (mpi_rank == 0)
+            fprintf(stderr, "Unknown problem preset '%s'\n", param.problem_name);
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+
     /* Grid points = cells + 1 (node-based grid) */
     const int64_t global_nx = param.global_nx_cells + 1;
     const int64_t global_ny = param.global_ny_cells + 1;
@@ -79,6 +88,19 @@ int main(int argc, char **argv)
 
     ngfs_3d_allocate(/*nvars=*/3, &gfs);
 
+    /* Stamp the preset's BC spec onto the root level.  The hierarchy
+     * constructor (called next) homogenises this for every coarse
+     * level via bc_spec_homogenize -- the unknown on a coarse grid is
+     * the correction e_H, whose BC is always homogeneous. */
+    gfs.bc = malloc(sizeof(struct bc_spec_t));
+    if (!gfs.bc)
+    {
+        if (mpi_rank == 0)
+            fprintf(stderr, "Out of memory allocating bc_spec_t\n");
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+    *gfs.bc = problem->bc;
+
     /* ---- Build coarse-grid hierarchy (multigrid only) ---- */
     if (param.use_multigrid)
     {
@@ -98,6 +120,7 @@ int main(int argc, char **argv)
                (long long)global_nz);
         printf("Topology: %zu x %zu x %zu  (%d ranks)\n",
                topology[0], topology[1], topology[2], mpi_size);
+        printf("Problem:  %s\n", problem->name);
         printf("Solver:   %s\n",
                param.use_multigrid ? "multigrid V-cycle" : "Gauss-Seidel");
         printf("omega = %.4f,  n_smooth = %d,  n_iters = %d,  tol = %g\n",
@@ -113,30 +136,9 @@ int main(int argc, char **argv)
         }
     }
 
-    /* ---- Manufactured solution:  u_exact = sin(pi*x)*sin(pi*y)*sin(pi*z)
-     *      => Laplacian u_exact = -3*pi^2 * u_exact
-     *      Set VAR_RHS = -3*pi^2 * u_exact, VAR_SOL = 0               ---- */
-    const double pi  = acos(-1.0);
-    const double pi2 = pi * pi;
-
-    double *rhs = gfs.vars[VAR_RHS]->val;
-    double *sol = gfs.vars[VAR_SOL]->val;
-
-    for (int64_t k = 0; k < gfs.nz; k++)
-    {
-        const double z = gfs.z0 + k * gfs.dz;
-        for (int64_t j = 0; j < gfs.ny; j++)
-        {
-            const double y = gfs.y0 + j * gfs.dy;
-            for (int64_t i = 0; i < gfs.nx; i++)
-            {
-                const double  x   = gfs.x0 + i * gfs.dx;
-                const int64_t idx = gf_indx_3d(&gfs, i, j, k);
-                rhs[idx] = -3.0 * pi2 * sin(pi * x) * sin(pi * y) * sin(pi * z);
-                sol[idx] = 0.0;
-            }
-        }
-    }
+    /* ---- Initialise from the preset ---- */
+    problem_initialise_rhs   (&gfs, problem);
+    problem_apply_initial_bc (&gfs, problem);
     apply_bc_3d(&gfs, VAR_SOL);
 
     /* ---- Solve ---- */
@@ -157,6 +159,14 @@ int main(int argc, char **argv)
             norm = calc_defect_3d(&gfs);
         }
 
+        /* Singular problems (all-Neumann): project the solution onto
+         * the mean-zero subspace.  The discrete operator has the
+         * constant function in its null space, so the V-cycle leaves
+         * the mean of u undetermined; periodic projection prevents
+         * round-off drift along that null direction. */
+        if (problem->singular)
+            problem_project_mean_zero(&gfs, VAR_SOL);
+
         if (mpi_rank == 0)
             printf("iter %4d  |defect|_inf = %12.6e\n", it, norm);
 
@@ -164,30 +174,10 @@ int main(int argc, char **argv)
             break;
     }
 
-    /* ---- Error vs exact solution ---- */
-    double local_err = 0.0;
-    for (int64_t k = gfs.gs; k < gfs.nz - gfs.gs; k++)
-    {
-        const double z = gfs.z0 + k * gfs.dz;
-        for (int64_t j = gfs.gs; j < gfs.ny - gfs.gs; j++)
-        {
-            const double y = gfs.y0 + j * gfs.dy;
-            for (int64_t i = gfs.gs; i < gfs.nx - gfs.gs; i++)
-            {
-                const double  x       = gfs.x0 + i * gfs.dx;
-                const int64_t idx     = gf_indx_3d(&gfs, i, j, k);
-                const double  u_exact = sin(pi * x) * sin(pi * y) * sin(pi * z);
-                const double  err     = fabs(sol[idx] - u_exact);
-                if (err > local_err)
-                    local_err = err;
-            }
-        }
-    }
-    double global_err;
-    MPI_Allreduce(&local_err, &global_err, 1, MPI_DOUBLE, MPI_MAX,
-                  gfs.domain.cart_comm);
-    if (mpi_rank == 0)
-        printf("\n|u - u_exact|_inf = %12.6e\n", global_err);
+    /* ---- Error vs exact solution (when the preset supplies one) ---- */
+    const double err = problem_compute_max_error(&gfs, problem);
+    if (mpi_rank == 0 && err >= 0.0)
+        printf("\n|u - u_exact|_inf = %12.6e\n", err);
 
     output_3d_gf(&gfs, 0);
 

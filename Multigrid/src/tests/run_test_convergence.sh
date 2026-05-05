@@ -2,14 +2,22 @@
 #
 # End-to-end discretisation-convergence test.
 #
-# Runs driver_multigrid against the manufactured-solution Poisson problem
-# at three resolutions (32^3, 64^3, 128^3) and asserts that the printed
+# Runs driver_multigrid against a named manufactured-solution preset at
+# three resolutions (32^3, 64^3, 128^3) and asserts that the printed
 # |u - u_exact|_inf shrinks at the second-order rate predicted by the
 # 7-point Laplacian.
 #
 # The test is performed twice: first sequentially (np=1) to isolate
-# algorithmic behaviour, then in parallel (np=8) to ensure the
-# parallel path does not degrade the discretisation error.
+# algorithmic behaviour, then in parallel (np=8) to ensure the parallel
+# path does not degrade the discretisation error.
+#
+# Usage:
+#     run_test_convergence.sh [PRESET]
+#
+# PRESET is the name of an entry in g_problems[] (problem_registry.c).
+# Defaults to "manufactured_dirichlet_homog" (the original test problem).
+
+PRESET="${1:-manufactured_dirichlet_homog}"
 
 check()
 {
@@ -32,9 +40,10 @@ then
     exit 1
 fi
 
-# All driver outputs (logs, TOMLs, per-rank JSON spam) land in this
-# subdirectory and are wiped at the end.
-WORKDIR=convergence_run
+# All driver outputs (logs, TOMLs, per-rank JSON spam) land in a per-
+# preset subdirectory and are wiped at the end.  Per-preset isolation
+# means CTest's -j parallel mode does not collide between presets.
+WORKDIR="convergence_run_${PRESET}"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR" || exit 1
 
@@ -54,12 +63,15 @@ nz_cells = $n
 
 [solver]
 multigrid = true
-omega     = 1.5
+omega     = 1.0
 n_smooth  = 50
-n_iters   = 20
+n_iters   = 60
 tol       = 1.0e-12
 subcycles = 1
 min_cells = 4
+
+[problem]
+name = "${PRESET}"
 EOF
 }
 
@@ -91,7 +103,7 @@ verify()
 # -----------------------------------------------------------------------------
 # Sequential pass
 # -----------------------------------------------------------------------------
-echo "=== convergence test (sequential, np=1) ==="
+echo "=== convergence test [${PRESET}] (sequential, np=1) ==="
 run_one 1 32
 run_one 1 64
 run_one 1 128
@@ -100,11 +112,11 @@ verify log_np1_32.txt log_np1_64.txt log_np1_128.txt
 # -----------------------------------------------------------------------------
 # Parallel pass (8 ranks, 2 x 2 x 2 process grid)
 # -----------------------------------------------------------------------------
-echo "=== convergence test (parallel, np=8) ==="
+echo "=== convergence test [${PRESET}] (parallel, np=8) ==="
 run_one 8 32
 run_one 8 64
 run_one 8 128
 verify log_np8_32.txt log_np8_64.txt log_np8_128.txt
 
 cd ..
-echo "All convergence tests passed"
+echo "All convergence tests for ${PRESET} passed"

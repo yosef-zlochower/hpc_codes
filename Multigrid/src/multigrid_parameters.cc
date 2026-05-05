@@ -1,6 +1,13 @@
 #include "multigrid_parameters.h"
 #include "parameter.hpp"
+#include <cstring>
 #include <iostream>
+
+/* Default problem preset used when the TOML omits the [problem] section.
+ * The string itself must match a name in g_problems[] (see
+ * problem_registry.c). */
+static constexpr const char *DEFAULT_PROBLEM_NAME =
+    "manufactured_dirichlet_homog";
 
 extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
 {
@@ -52,6 +59,37 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
         param->min_cells = 4;
     }
 
+    /* [problem] is optional.  When absent, fall back to the default
+     * preset (which reproduces the original hard-coded behaviour
+     * bit-for-bit -- the back-compat invariant that lets every
+     * pre-existing TOML keep working).  When present, validate its
+     * keys against the allowlist below alongside [grid] and
+     * [solver]. */
+    {
+        const auto problem_section = tbl["problem"].as_table();
+        std::string name;
+        if (problem_section)
+        {
+            name = parameters::get_string_value("problem", "name", tbl);
+        }
+        else
+        {
+            name = DEFAULT_PROBLEM_NAME;
+        }
+
+        if (name.size() >= sizeof(param->problem_name))
+        {
+            std::cerr << "invalid problem::name value -- '" << name
+                      << "' exceeds " << (sizeof(param->problem_name) - 1)
+                      << "-character limit\n";
+            parameters::increment_error();
+            name.clear();
+        }
+        std::strncpy(param->problem_name, name.c_str(),
+                     sizeof(param->problem_name) - 1);
+        param->problem_name[sizeof(param->problem_name) - 1] = '\0';
+    }
+
     /* Reject any TOML entry that isn't in the documented schema.  This
      * catches typos like `mulitgrid = true`, which would otherwise be
      * silently ignored: the get_*_value helpers above would not find
@@ -64,12 +102,14 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
      * though they are only consumed when multigrid = true, because we
      * want to allow users to leave them in the file when toggling the
      * solver mode. */
-    parameters::check_known_sections(tbl, { "grid", "solver" });
+    parameters::check_known_sections(tbl, { "grid", "solver", "problem" });
     parameters::check_known_keys(tbl, "grid",
         { "nx_cells", "ny_cells", "nz_cells" });
     parameters::check_known_keys(tbl, "solver",
         { "multigrid", "omega", "n_smooth", "n_iters", "tol",
           "subcycles", "min_cells" });
+    parameters::check_known_keys(tbl, "problem",
+        { "name" });
 
     return parameters::error_count();
 }

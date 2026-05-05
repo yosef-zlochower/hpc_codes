@@ -211,6 +211,17 @@ int ngfs_3d_create_child(struct ngfs_3d *parent, int min_cells_per_direction)
     child->parent = parent;
     parent->child = child;
 
+    /* Coarse levels carry the homogeneous variant of the parent's BC
+     * kind: the unknown on a coarse grid is the correction e_H, whose
+     * boundary condition is always homogeneous (e=0 on Dirichlet,
+     * de/dn = 0 on Neumann) regardless of the inhomogeneous data the
+     * user supplied at the fine level. */
+    if (parent->bc) {
+        child->bc = malloc(sizeof(struct bc_spec_t));
+        if (child->bc)
+            bc_spec_homogenize(parent->bc, child->bc);
+    }
+
     return 0;
 }
 
@@ -575,13 +586,28 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
     const int64_t pp_lo_z = (parent->domain.lower_z_rank != INVALID_RANK) ? gs : 0;
     const int64_t pp_hi_z = parent->nz - ((parent->domain.upper_z_rank != INVALID_RANK) ? gs : 0);
 
+    /* Per-face skip flags.  Skip the fine-grid boundary node only on
+     * Dirichlet faces (where the correction must remain zero so the
+     * fine-grid Dirichlet data is preserved across coarse-grid
+     * corrections); on Neumann faces the boundary node IS an unknown
+     * and the correction is non-zero there.  When parent->bc is NULL
+     * we fall back to the historical default (homogeneous Dirichlet
+     * on every face) so operator-level unit tests keep working. */
+    const bool skip_lo_x = (!parent->bc || parent->bc->face[FACE_LOWER_X].kind == BC_DIRICHLET);
+    const bool skip_hi_x = (!parent->bc || parent->bc->face[FACE_UPPER_X].kind == BC_DIRICHLET);
+    const bool skip_lo_y = (!parent->bc || parent->bc->face[FACE_LOWER_Y].kind == BC_DIRICHLET);
+    const bool skip_hi_y = (!parent->bc || parent->bc->face[FACE_UPPER_Y].kind == BC_DIRICHLET);
+    const bool skip_lo_z = (!parent->bc || parent->bc->face[FACE_LOWER_Z].kind == BC_DIRICHLET);
+    const bool skip_hi_z = (!parent->bc || parent->bc->face[FACE_UPPER_Z].kind == BC_DIRICHLET);
+
     const int64_t gni3 = parent->domain.global_ni;
     const int64_t gnj3 = parent->domain.global_nj;
     const int64_t gnk3 = parent->domain.global_nk;
     for (int64_t kp = pp_lo_z; kp < pp_hi_z; kp++)
     {
         const int64_t pg_z = parent->domain.local_k0 + kp;
-        if (pg_z == 0 || pg_z == gnk3 - 1) continue;
+        if (skip_lo_z && pg_z == 0)         continue;
+        if (skip_hi_z && pg_z == gnk3 - 1)  continue;
 
         const int z_even = (pg_z % 2 == 0);
         const int64_t cg_z = (pg_z + (z_even ? 0 : 1)) / 2;
@@ -590,7 +616,8 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
         for (int64_t jp = pp_lo_y; jp < pp_hi_y; jp++)
         {
             const int64_t pg_y = parent->domain.local_j0 + jp;
-            if (pg_y == 0 || pg_y == gnj3 - 1) continue;
+            if (skip_lo_y && pg_y == 0)         continue;
+            if (skip_hi_y && pg_y == gnj3 - 1)  continue;
 
             const int y_even = (pg_y % 2 == 0);
             const int64_t cg_y = (pg_y + (y_even ? 0 : 1)) / 2;
@@ -599,7 +626,8 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
             for (int64_t ip = pp_lo_x; ip < pp_hi_x; ip++)
             {
                 const int64_t pg_x = parent->domain.local_i0 + ip;
-                if (pg_x == 0 || pg_x == gni3 - 1) continue;
+                if (skip_lo_x && pg_x == 0)         continue;
+                if (skip_hi_x && pg_x == gni3 - 1)  continue;
 
                 const int x_even = (pg_x % 2 == 0);
                 const int64_t cg_x = (pg_x + (x_even ? 0 : 1)) / 2;

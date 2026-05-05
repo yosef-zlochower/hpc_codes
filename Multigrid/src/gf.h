@@ -1,6 +1,7 @@
 #ifndef GF_H
 #define GF_H
 
+#include "bc.h"
 #include "domain.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -52,6 +53,14 @@ struct ngfs_3d
 
     struct ngfs_3d *parent; /* coarser grid, NULL if this is the coarsest */
     struct ngfs_3d *child;  /* finer grid, NULL if this is the finest */
+
+    /* Per-face boundary conditions.  Owned by this struct (allocated
+     * either by the driver or by ngfs_3d_create_child) and freed in
+     * ngfs_3d_deallocate.  NULL means "homogeneous Dirichlet on every
+     * physical-boundary face" -- the historical default that keeps
+     * code paths which never set BCs explicitly (e.g. operator-level
+     * unit tests) working unchanged. */
+    struct bc_spec_t *bc;
 };
 
 struct ngfs_2d
