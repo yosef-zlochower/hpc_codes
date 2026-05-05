@@ -4,39 +4,76 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build Commands
 
+The build is CMake-driven and out-of-tree — every artefact (object
+files, libraries, executables, test outputs) lands under the chosen
+build directory and never in `src/`.  The top-level `CMakeLists.txt`
+lives in the project root and pulls in `src/` via `add_subdirectory`,
+so the typical commands are run from there:
+
 ```bash
-# Build the driver (default target)
-make
+# Default configuration: production build.
+#   BUILD_TESTING       = OFF (no tests compiled; ctest will be a no-op)
+#   MULTIGRID_FAST_MATH = ON  (auto-defaulted from BUILD_TESTING)
+cmake -B build
+cmake --build build -j
+mpirun -np <N> build/src/driver_multigrid <params.toml>
 
-# Equivalent: build the multigrid driver explicitly
-make driver_multigrid
-
-# Build and run the full test suite (operator unit tests + end-to-end
-# convergence test).  Depends on driver_multigrid being built.
-make tests
-
-# Run tests individually (must be run from tests/ directory)
-cd tests && bash run_test.sh                # MPI domain decomposition
-cd tests && bash run_test_child.sh          # multigrid hierarchy
-cd tests && bash run_test_project.sh        # injection + restriction
-cd tests && bash run_test_prolong.sh        # linear prolongation
-cd tests && bash run_test_restrict_nl.sh    # full-weighting restriction
-cd tests && bash run_test_prolong_nl.sh     # trilinear prolongation
-cd tests && bash run_test_convergence.sh    # end-to-end second-order rate
-
-# Clean (also removes tests/convergence_run/)
-make clean
-
-# Clean + remove all per-rank JSON output
-make distclean
+# Test configuration: BUILD_TESTING must be enabled explicitly.
+# Doing so also flips MULTIGRID_FAST_MATH off (auto-default) so the
+# convergence test measures the discretisation error rather than
+# -ffast-math reassociations.
+cmake -B build-test -DBUILD_TESTING=ON
+cmake --build build-test -j
+ctest --test-dir build-test --output-on-failure
 ```
 
-Compilers: `mpicc` (C, `-Wall -O3 -ffast-math -g`) and `mpicxx` (C++17 for the
-TOML parameter reader).  The final link uses `mpicxx` so the C++ standard
-library runtime is included alongside the C objects.  Tests use Python
-(`verify.py`, `verify_nl_prolong.py`, `verify_convergence.py`, etc.) to
-check correctness by reconstructing the global solution from per-rank
-JSON output, or by parsing the driver's printed error.
+**Note:** running `ctest --test-dir build` against the default
+production build will report "No tests were found" — the test
+binaries and CTest entries are only generated when
+`BUILD_TESTING=ON` is set at configure time. Re-configure with
+`-DBUILD_TESTING=ON` (or use a separate build directory as shown
+above) to run the suite.
+
+The build-tree layout mirrors the source tree, so the driver lands at
+`build/src/driver_multigrid` and test binaries at
+`build-test/src/tests/`.
+
+### CMake options
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `BUILD_TESTING` | `ON` | Build the operator-level test binaries, copy bash/Python verifiers into the build tree, and register CTest entries. |
+| `MULTIGRID_FAST_MATH` | auto: `OFF` when `BUILD_TESTING=ON`, `ON` otherwise | Adds `-ffast-math` to the compile flags. The auto-default keeps tests strict and production fast; either default can be overridden explicitly with `-DMULTIGRID_FAST_MATH=ON/OFF` on the cmake command line. |
+
+The auto-policy gives you what you almost always want without having
+to remember to set anything.  Explicit overrides are still supported
+for advanced workflows (e.g. running the test suite under `-ffast-math`
+to spot any numerics-sensitive assertion drift).
+
+### Test labels
+
+CTest tests are tagged so you can run a subset:
+
+```bash
+ctest --test-dir build -L operator    # operator-level unit tests (6 suites)
+ctest --test-dir build -L end_to_end  # parser + convergence end-to-end tests
+```
+
+Compilers: CMake picks up MPI's `mpicc` / `mpicxx` wrappers via
+`find_package(MPI REQUIRED COMPONENTS C CXX)`. The driver is C but
+links against the C++ parser (`multigrid_parameters.cc`,
+`parameter.cc`); the link step uses the C++ frontend so the C++
+runtime is pulled in. Tests use Python (`verify.py`,
+`verify_nl_prolong.py`, `verify_convergence.py`, etc.) to check
+correctness either by reconstructing the global field from per-rank
+JSON output or by parsing the driver's printed error.
+
+### Cleaning up
+
+```bash
+cmake --build build --target clean    # remove generated objects/binaries
+rm -rf build                          # full reset including test outputs
+```
 
 ## Running the Solver
 

@@ -4,7 +4,7 @@
 #include "gf.h"
 #include "io.h"
 #include "multigrid.h"
-#include "parameter.h"
+#include "multigrid_parameters.h"
 #include <math.h>
 #include <mpi.h>
 #include <stdio.h>

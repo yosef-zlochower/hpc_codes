@@ -65,8 +65,8 @@ vcycle_3d(level, n_smooth, omega, tol, subcycles):
             restrict_var_3d(level, VAR_DEF, child, VAR_RHS)
             vcycle_3d(child, ...)                  # recurse — child prolongs into level.VAR_SOL
             sync_var_3d(level, VAR_SOL)
-            gauss_seidel_3d(level, n_smooth, omega)   # post-smooth
-            gauss_seidel_3d(level, n_smooth, 1.0)     # extra plain GS pass
+            gauss_seidel_3d(level, n_smooth, omega)   # post-smooth (SOR)
+            gauss_seidel_3d(level, n_smooth, 1.0)     # post-smooth (plain GS, robust high-freq damping)
             norm = calc_defect_3d(level)
             if norm <= tol: break
     if level.parent:
@@ -74,7 +74,9 @@ vcycle_3d(level, n_smooth, omega, tol, subcycles):
     return norm
 ```
 
-With `subcycles = 1` this is a standard V-cycle. With `subcycles > 1` and the early-exit on `tol`, the inner loop adds extra coarse-grid visits per level — closer to a W-cycle but data-dependent. The two post-smooths (one with `omega`, one with `omega = 1.0`) provide a slight smoothing finish before checking the defect.
+With `subcycles = 1` this is a standard V-cycle. With `subcycles > 1` and the early-exit on `tol`, the inner loop adds extra coarse-grid visits per level — closer to a W-cycle but data-dependent.
+
+The two post-smoothing passes are deliberate. The SOR pass with the user-supplied `omega` accelerates convergence on the slowly-varying (smooth) error, but for `omega > 1` its smoothing factor on the highest frequencies can be worse than plain Gauss–Seidel. Red-black GS with `omega = 1.0` achieves a smoothing factor of ~1/4 on the 7-point Laplacian independent of `h`, so the second pass is what guarantees high-frequency damping before the defect is restricted (or the cycle returns to the parent), regardless of the user's choice of `omega`. The cost is one extra `n_smooth` sweep per subcycle.
 
 ## 7. Driver flow (`driver_multigrid.c`)
 
@@ -164,3 +166,72 @@ Each call to the driver solves a single problem. To reuse a hierarchy across mul
 ---
 
 The cleanest refactor for extension would be to split `driver_multigrid.c` into a thin driver plus two user-supplied callbacks `f(x,y,z)` and `g(x,y,z)` (and optionally `u_exact(x,y,z)` for diagnostics) — at present these are inlined into `main`, which is why a new source needs an edit-and-rebuild.
+
+---
+
+## 10. Building and running
+
+The build is CMake-driven and out-of-tree — every artefact lands under the chosen build directory and never in `src/`. The top-level `CMakeLists.txt` lives in the project root and pulls in `src/` via `add_subdirectory`, so all commands run from the project root.
+
+### Production build (default)
+
+```bash
+cmake -B build
+cmake --build build -j
+mpirun -np <N> build/src/driver_multigrid <params.toml>
+```
+
+Default options are:
+
+- `BUILD_TESTING = OFF` — only the driver and its libraries are built; CTest is not enabled.
+- `MULTIGRID_FAST_MATH = ON` — `-ffast-math` is added to the compile flags. The default is auto-selected from `BUILD_TESTING`.
+
+### Test build
+
+```bash
+cmake -B build-test -DBUILD_TESTING=ON
+cmake --build build-test -j
+ctest --test-dir build-test --output-on-failure
+```
+
+Setting `BUILD_TESTING=ON` automatically flips `MULTIGRID_FAST_MATH` to `OFF` so the convergence test (§5.2 of `Plan.md`) measures the true discretisation error rather than `-ffast-math` reassociations.
+
+> **Note:** running `ctest --test-dir build` against the default production tree reports `No tests were found` — the test binaries and CTest entries are only generated when `BUILD_TESTING=ON` is set at configure time. Use the dedicated test build directory.
+
+Either auto-default can be overridden explicitly:
+
+```bash
+cmake -B build -DMULTIGRID_FAST_MATH=OFF                   # strict-numerics production
+cmake -B build-test -DBUILD_TESTING=ON -DMULTIGRID_FAST_MATH=ON  # tests under fast-math
+```
+
+### CTest labels
+
+CTest tests are tagged so subsets can run independently:
+
+```bash
+ctest --test-dir build-test -L operator    # 6 operator-level unit tests
+ctest --test-dir build-test -L end_to_end  # parser + convergence end-to-end
+```
+
+### Build-tree layout
+
+```
+build/                     # or build-test/
+├── src/
+│   ├── driver_multigrid          # production / test driver
+│   └── tests/
+│       ├── test_*               # operator-level test binaries
+│       ├── run_test_*.sh        # bash drivers (copied from src/tests/)
+│       ├── verify_*.py          # Python verifiers (copied)
+│       ├── convergence_run/     # transient: convergence test artefacts
+│       └── parser_run/          # transient: parser test artefacts
+└── CMakeFiles/...                # CMake bookkeeping + object files
+```
+
+Cleaning:
+
+```bash
+cmake --build build --target clean   # remove generated objects/binaries
+rm -rf build                         # full reset
+```

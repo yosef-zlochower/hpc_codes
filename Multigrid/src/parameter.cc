@@ -1,8 +1,17 @@
-#include "parameter.h"
+#include "parameter.hpp"
+#include <climits>
 #include <iostream>
 #include <math.h>
+#include <set>
+#include <string_view>
 
-#define INVALID_INTEGER ((int64_t)0xdeadbeef)
+/* The sentinel must fit in BOTH int32_t and int64_t so the 32- and
+ * 64-bit error returns share one value.  static_cast<int32_t>(0xdeadbeef)
+ * sign-extends to -559038737 in int32_t, and to the same -559038737 when
+ * subsequently widened to int64_t.  Any caller that wants to detect a
+ * parser failure should check parameters::error_count() rather than
+ * comparing return values; the sentinel is purely a defensive default. */
+#define INVALID_INTEGER (static_cast<int64_t>(static_cast<int32_t>(0xdeadbeef)))
 #define INVALID_DOUBLE  nan("")
 
 /* File-local error counter.  Exposed to callers via parameters::reset_error()
@@ -11,13 +20,22 @@ static int parser_error = 0;
 
 namespace parameters {
 
-void reset_error() { parser_error = 0; }
-int  error_count() { return parser_error; }
+void reset_error()     { parser_error = 0; }
+int  error_count()     { return parser_error; }
+void increment_error() { parser_error++; }
 
-int64_t get_integer_value(const char *section, const char *element,
-                          toml::table &tbl)
+/* Build a dotted TOML path "section.element" so toml++'s at_path() can
+ * descend into nested sub-tables — e.g. section = "source.plane_wave",
+ * element = "ax" resolves to the node at source.plane_wave.ax. */
+static inline std::string path_of(const char *section, const char *element)
 {
-    auto entry = tbl[section][element];
+    return std::string(section) + "." + element;
+}
+
+int64_t get_integer64_value(const char *section, const char *element,
+                            toml::table &tbl)
+{
+    auto entry = tbl.at_path(path_of(section, element));
     if (entry.is_integer())
         return static_cast<int64_t>(*entry.as_integer());
     std::cerr << "invalid " << section << "::" << element << " value\n"
@@ -26,10 +44,25 @@ int64_t get_integer_value(const char *section, const char *element,
     return INVALID_INTEGER;
 }
 
+int32_t get_integer32_value(const char *section, const char *element,
+                            toml::table &tbl)
+{
+    int64_t res = get_integer64_value(section, element, tbl);
+    if (res > INT_MAX || res < INT_MIN)
+    {
+        std::cerr << "invalid " << section << "::" << element
+                  << " value — " << res << " is outside the 32-bit int range "
+                  << "[" << INT_MIN << ", " << INT_MAX << "]\n";
+        parser_error++;
+        return static_cast<int32_t>(INVALID_INTEGER);
+    }
+    return static_cast<int32_t>(res);
+}
+
 double get_real_value(const char *section, const char *element,
                       toml::table &tbl)
 {
-    auto entry = tbl[section][element];
+    auto entry = tbl.at_path(path_of(section, element));
     if (entry.is_floating_point())
         return static_cast<double>(*entry.as_floating_point());
     if (entry.is_integer())
@@ -68,10 +101,16 @@ double get_nonnegative_real_value(const char *section, const char *element,
     return res;
 }
 
-int64_t get_positive_integer_value(const char *section, const char *element,
-                                   toml::table &tbl)
+/* See the 32-bit variants below for the rationale on the err_before
+ * guard: if the inner get_integer64_value raised an error (missing
+ * key or wrong type), the sentinel return is negative and would
+ * otherwise produce a spurious second "must be positive" error. */
+int64_t get_positive_integer64_value(const char *section, const char *element,
+                                     toml::table &tbl)
 {
-    int64_t res = get_integer_value(section, element, tbl);
+    const int err_before = parser_error;
+    int64_t res = get_integer64_value(section, element, tbl);
+    if (parser_error > err_before) return res;
     if (res <= 0)
     {
         std::cerr << "invalid " << section << "::" << element
@@ -82,10 +121,12 @@ int64_t get_positive_integer_value(const char *section, const char *element,
     return res;
 }
 
-int64_t get_nonnegative_integer_value(const char *section, const char *element,
-                                      toml::table &tbl)
+int64_t get_nonnegative_integer64_value(const char *section, const char *element,
+                                        toml::table &tbl)
 {
-    int64_t res = get_integer_value(section, element, tbl);
+    const int err_before = parser_error;
+    int64_t res = get_integer64_value(section, element, tbl);
+    if (parser_error > err_before) return res;
     if (res < 0)
     {
         std::cerr << "invalid " << section << "::" << element
@@ -96,10 +137,51 @@ int64_t get_nonnegative_integer_value(const char *section, const char *element,
     return res;
 }
 
+/* The 32-bit positive/nonnegative variants are layered on top of
+ * get_integer32_value: the [INT_MIN, INT_MAX] bounds check happens
+ * first, so a value above INT_MAX is reported as a range error rather
+ * than passing the positivity check and then silently truncating.
+ *
+ * If get_integer32_value itself raised an error (missing key, wrong
+ * type, or out-of-range), the sign/non-negativity check is skipped --
+ * the sentinel return is negative, which would otherwise produce a
+ * confusing second "must be positive" error on top of the real one. */
+int32_t get_positive_integer32_value(const char *section, const char *element,
+                                     toml::table &tbl)
+{
+    const int err_before = parser_error;
+    int32_t res = get_integer32_value(section, element, tbl);
+    if (parser_error > err_before) return res;
+    if (res <= 0)
+    {
+        std::cerr << "invalid " << section << "::" << element
+                  << " value — must be positive\n";
+        parser_error++;
+        return static_cast<int32_t>(INVALID_INTEGER);
+    }
+    return res;
+}
+
+int32_t get_nonnegative_integer32_value(const char *section, const char *element,
+                                        toml::table &tbl)
+{
+    const int err_before = parser_error;
+    int32_t res = get_integer32_value(section, element, tbl);
+    if (parser_error > err_before) return res;
+    if (res < 0)
+    {
+        std::cerr << "invalid " << section << "::" << element
+                  << " value — must be non-negative\n";
+        parser_error++;
+        return static_cast<int32_t>(INVALID_INTEGER);
+    }
+    return res;
+}
+
 bool get_boolean_value(const char *section, const char *element,
                        toml::table &tbl, bool required)
 {
-    auto entry = tbl[section][element];
+    auto entry = tbl.at_path(path_of(section, element));
     if (entry.is_boolean())
         return static_cast<bool>(*entry.as_boolean());
     if (required)
@@ -109,6 +191,68 @@ bool get_boolean_value(const char *section, const char *element,
         parser_error++;
     }
     return false;
+}
+
+std::string get_string_value(const char *section, const char *element,
+                             toml::table &tbl)
+{
+    auto entry = tbl.at_path(path_of(section, element));
+    if (entry.is_string())
+        return std::string(*entry.as_string());
+    std::cerr << "invalid " << section << "::" << element << " value\n"
+              << "Expected a string, but didn't find one\n";
+    parser_error++;
+    return "";
+}
+
+/* Build a std::set<std::string> from an initializer_list of C strings.
+ * Used by both validators to look up keys in average O(log n) with an
+ * implicit C-string -> std::string conversion. */
+static std::set<std::string>
+make_set(std::initializer_list<const char *> known)
+{
+    std::set<std::string> s;
+    for (const char *k : known) s.insert(k);
+    return s;
+}
+
+void check_known_sections(toml::table &tbl,
+                          std::initializer_list<const char *> known)
+{
+    const std::set<std::string> allowed = make_set(known);
+    for (auto&& [key, value] : tbl)
+    {
+        const std::string k(key.str());
+        if (allowed.find(k) == allowed.end())
+        {
+            std::cerr << "unknown top-level entry '" << k
+                      << "' in TOML file\n";
+            parser_error++;
+        }
+    }
+}
+
+void check_known_keys(toml::table &tbl,
+                      const char *section,
+                      std::initializer_list<const char *> known)
+{
+    /* If [section] is missing, leave the diagnostics to the per-key
+     * get_*_value calls -- they will each report the missing required
+     * key, which is more useful than a generic "section not found". */
+    auto sec = tbl[section].as_table();
+    if (!sec) return;
+
+    const std::set<std::string> allowed = make_set(known);
+    for (auto&& [key, value] : *sec)
+    {
+        const std::string k(key.str());
+        if (allowed.find(k) == allowed.end())
+        {
+            std::cerr << "unknown key '" << section << "." << k
+                      << "' in TOML file\n";
+            parser_error++;
+        }
+    }
 }
 
 } /* namespace parameters */

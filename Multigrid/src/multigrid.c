@@ -755,7 +755,27 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
              * rank boundaries.  Must sync before post-smoothing reads them. */
             sync_var_3d(gfs, VAR_SOL);
 
-            /* Post-smoothing: standard omega pass, then plain Gauss-Seidel.
+            /* Post-smoothing: two passes.
+             *
+             *   1. SOR pass with the user-supplied omega.  When omega > 1
+             *      this attacks the smooth (low-frequency) error
+             *      components efficiently but, depending on omega, can
+             *      have a poorer smoothing factor on the very highest
+             *      frequencies than plain Gauss-Seidel.
+             *   2. Plain Gauss-Seidel pass (omega = 1.0).  Red-black
+             *      Gauss-Seidel has a smoothing factor of ~1/4 on the
+             *      seven-point Laplacian -- independent of h -- so this
+             *      pass is the one we rely on to damp the high-frequency
+             *      content before the defect is restricted (or the cycle
+             *      returns to its parent).
+             *
+             * The two-pass post-smooth is therefore deliberate: the SOR
+             * pass accelerates convergence on the slowly-varying error,
+             * the plain-GS pass guarantees a robust high-frequency
+             * smoothing factor regardless of the user's choice of omega.
+             * See the "smoothing factor of relaxation" discussion in
+             * Trottenberg, Oosterlee & Schueller, Multigrid (2001), Sec. 2.1.
+             *
              * gauss_seidel_3d syncs VAR_SOL on exit of each call. */
             gauss_seidel_3d(gfs, n_smooth, omega);
             gauss_seidel_3d(gfs, n_smooth, 1.0);
