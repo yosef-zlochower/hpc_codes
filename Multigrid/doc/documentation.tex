@@ -781,112 +781,251 @@ powers of two are accepted but bottom out at the first odd factor.
 \section{Extending the code}\label{sec:extension}
 % =============================================================================
 
-The grid hierarchy, the smoother coefficients (which are computed per
-level from $h_x,h_y,h_z$), the defect, and the transfer operators are
-\emph{independent of} the right-hand side and depend on the boundary
-conditions only through the function \texttt{apply\_bc\_3d} and the
-boundary handling inside \texttt{prolong\_var\_3d}.  Modifications are
-therefore highly localised.
+For the most common extension --- a different right-hand side and
+different boundary data on the same Poisson operator --- the code is
+fully data-driven.  The smoother, V-cycle, transfer operators, and
+boundary kernels do not need to be edited; the user supplies a small
+record of callbacks (a \emph{problem preset}), the driver picks one up
+by name from the TOML, and everything downstream is automatic.  This
+is described in \Cref{sec:adding-preset}.
 
-\subsection{Different right-hand sides}\label{sec:other-source}
-To solve $\Delta u = f$ for a different $f$ on the same domain with the
-same homogeneous Dirichlet condition, edit only the RHS-init loop in
-\texttt{src/driver\_multigrid.c} (lines 125--139):
+A second tier of extensions --- Robin and periodic boundary conditions,
+variable coefficients, anisotropic operators --- still requires
+modifying the kernels and is outlined in
+\Cref{sec:bc-robin,sec:bc-periodic,sec:variable}.
+
+\subsection{Adding a new problem: the preset workflow}\label{sec:adding-preset}
+
+Every problem the driver can solve is encoded as a \texttt{problem\_t}
+record in the registry table \texttt{g\_problems[]}, defined in
+\texttt{src/problem\_registry.c}.  Adding a new problem is a one-file
+edit: write a few pure C functions, append a record to the table,
+rebuild.
+
+\subsubsection{Anatomy of a preset}
+
+The public interface is in \texttt{src/problem.h}:
 \begin{lstlisting}
-for (int64_t k = 0; k < gfs.nz; k++) {
-    const double z = gfs.z0 + k * gfs.dz;
-    for (int64_t j = 0; j < gfs.ny; j++) {
-        const double y = gfs.y0 + j * gfs.dy;
-        for (int64_t i = 0; i < gfs.nx; i++) {
-            const double  x   = gfs.x0 + i * gfs.dx;
-            const int64_t idx = gf_indx_3d(&gfs, i, j, k);
-            rhs[idx] = my_f(x, y, z);   // <-- replace with new source
-            sol[idx] = 0.0;
-        }
+typedef double (*scalar_field_fn)(double x, double y, double z);
+typedef double (*bc_fn_t)(double x, double y, double z, face_id_t face);
+
+struct problem_t {
+    const char        *name;     /* TOML key */
+    struct bc_spec_t   bc;       /* per-face BC kinds + value callbacks */
+    scalar_field_fn    rhs;      /* f(x,y,z); required */
+    scalar_field_fn    u_exact;  /* optional (NULL if no closed form) */
+    bool               singular; /* true => mean-zero projection */
+};
+\end{lstlisting}
+The boundary specification \texttt{bc\_spec\_t} (in
+\texttt{src/bc.h}) is six \texttt{bc\_face\_t} entries, one per face:
+\begin{lstlisting}
+struct bc_face_t {
+    bc_kind_t kind;        /* BC_DIRICHLET or BC_NEUMANN */
+    bool      homogeneous; /* true => value/flux is identically 0 */
+    bc_fn_t   value;       /* ignored when homogeneous == true */
+};
+\end{lstlisting}
+\texttt{problem\_registry.c} provides four convenience macros that
+match the four common combinations:
+\begin{lstlisting}
+#define DIRICHLET_HOMOG_FACE          { BC_DIRICHLET, true,  NULL }
+#define DIRICHLET_INHOMOG_FACE(cb)    { BC_DIRICHLET, false, (cb) }
+#define NEUMANN_HOMOG_FACE            { BC_NEUMANN,   true,  NULL }
+#define NEUMANN_INHOMOG_FACE(cb)      { BC_NEUMANN,   false, (cb) }
+\end{lstlisting}
+Face identifiers are \verb|FACE_LOWER_X|, \verb|FACE_UPPER_X|,
+\verb|FACE_LOWER_Y|, \verb|FACE_UPPER_Y|, \verb|FACE_LOWER_Z|,
+\verb|FACE_UPPER_Z|.
+
+\subsubsection{Sign conventions}
+
+The equation is $\Delta u = f$ on $\Omega = [0,1]^3$.  Each callback
+takes the global $(x,y,z)$ coordinate of the boundary point and the
+face identifier:
+\begin{itemize}[leftmargin=*,nosep]
+\item \emph{Dirichlet} callbacks return $u(\mathbf{x})$ at the face
+  point --- the value the solver will pin on the boundary.
+\item \emph{Neumann} callbacks return $\partial u/\partial n$, the
+  outward-normal derivative.  Outward normals are
+  $-\hat{x}, +\hat{x}, -\hat{y}, +\hat{y}, -\hat{z}, +\hat{z}$ at the
+  six faces respectively, so on a lower face,
+  $\partial u/\partial n = -\partial u/\partial x_i$ and the user is
+  responsible for the sign flip.
+\end{itemize}
+
+\subsubsection{Singular flag}\label{sec:preset-singular}
+
+Set \verb|singular = true| only when \emph{every} face is Neumann.
+The driver then projects the discrete solution onto the mean-zero
+subspace after each V-cycle to remove the constant null-space drift.
+Pure Neumann also requires the discrete compatibility condition
+$\int_\Omega f \, d\mathbf{x} = \int_{\partial\Omega} q \, dS$ to hold;
+the implementation projects $f$ to mean-zero at startup (which handles
+the homogeneous case) but does \emph{not} currently account for the
+$\sum 2 q / h$ term that arises from the Neumann ghost-mirror
+discretisation.  As documented in \texttt{Plan.md}, the
+\texttt{manufactured\_neumann\_inhomog} preset (registered, but
+deliberately excluded from the convergence-test suite) demonstrates
+this limitation.  Mixed problems, where at least one face is
+Dirichlet, are non-singular and have no analogous restriction --- set
+\verb|singular = false|.
+
+\subsubsection{Worked example}\label{sec:adding-preset-example}
+
+To make the workflow concrete, take the manufactured solution
+\begin{equation*}
+  u^{\star}(x,y,z) \;=\; e^{x} \sin(\pi y) \cos(\pi z / 2),
+\end{equation*}
+which has $\nabla^{2} u^{\star} = (1 - 5\pi^{2}/4) \, u^{\star}$.
+Inspecting the function on each face gives a problem with mixed BCs:
+$x$ faces inhomogeneous Dirichlet, $y$ faces inhomogeneous Neumann,
+lower-$z$ homogeneous Neumann (because $\sin(\pi z/2)$'s derivative
+$\cos(\pi z/2)$ does not vanish at $z=0$, but
+$\partial u^\star/\partial z = -(\pi/2) e^x \sin(\pi y) \sin(\pi z/2)$
+does, since $\sin 0 = 0$), upper-$z$ inhomogeneous Neumann.
+
+Step~1: open \texttt{src/problem\_registry.c} and add the callbacks
+above the registry table:
+\begin{lstlisting}
+static double my_exact(double x, double y, double z)
+{
+    const double pi = 3.14159265358979323846;
+    return exp(x) * sin(pi * y) * cos(pi * z / 2.0);
+}
+static double my_rhs(double x, double y, double z)
+{
+    const double pi = 3.14159265358979323846;
+    return (1.0 - 5.0 * pi * pi / 4.0) * my_exact(x, y, z);
+}
+/* Dirichlet returns u_star at the face point. */
+static double my_dirichlet(double x, double y, double z, face_id_t face)
+{ (void)face; return my_exact(x, y, z); }
+/* Neumann returns du/dn (outward) at the face point.
+ * Lower-z is registered as NEUMANN_HOMOG_FACE so the lower-z case
+ * never enters this switch. */
+static double my_neumann(double x, double y, double z, face_id_t face)
+{
+    const double pi = 3.14159265358979323846;
+    const double dudy =  pi       * exp(x) * cos(pi * y) * cos(pi * z / 2.0);
+    const double dudz = -(pi/2.0) * exp(x) * sin(pi * y) * sin(pi * z / 2.0);
+    switch (face) {
+        case FACE_LOWER_Y: return -dudy;   /* outward normal -y */
+        case FACE_UPPER_Y: return  dudy;
+        case FACE_UPPER_Z: return  dudz;
+        default:           return 0.0;     /* never reached */
     }
 }
 \end{lstlisting}
-The closed-form-error block (lines 168--185) should be removed unless a
-manufactured solution is available.  Nothing else needs to change.
 
-A cleaner refactor is to introduce a function pointer
-\verb|double (*f_rhs)(double,double,double)| (and optionally
-\verb|double (*u_exact)(...)|) that the driver dispatches on.  This is a
-recommended student exercise.
-
-\subsection{Inhomogeneous Dirichlet, $u = g$ on $\partial\Omega$}\label{sec:bc-dirichlet}
-The function \texttt{apply\_bc\_3d} (\texttt{src/gauss\_seidel.c:21})
-currently writes $0$ on every physical-boundary face.  To enforce $u=g$,
-replace those writes with the value of $g$ at the corresponding global
-coordinate, e.g.
+Step~2: append the preset to \texttt{g\_problems[]}, immediately before
+the \verb|{ .name = NULL }| sentinel:
 \begin{lstlisting}
-if (gfs->domain.lower_x_rank == INVALID_RANK)
-    for (int k = 0; k < nz; k++)
-        for (int j = 0; j < ny; j++) {
-            const double y = gfs->y0 + j * gfs->dy;
-            const double z = gfs->z0 + k * gfs->dz;
-            v[gf_indx_3d(gfs, 0, j, k)] = g_lower_x(y, z);
-        }
+{
+    .name = "my_mixed_problem",
+    .bc   = { .face = {
+        [FACE_LOWER_X] = DIRICHLET_INHOMOG_FACE(my_dirichlet),
+        [FACE_UPPER_X] = DIRICHLET_INHOMOG_FACE(my_dirichlet),
+        [FACE_LOWER_Y] = NEUMANN_INHOMOG_FACE(my_neumann),
+        [FACE_UPPER_Y] = NEUMANN_INHOMOG_FACE(my_neumann),
+        [FACE_LOWER_Z] = NEUMANN_HOMOG_FACE,
+        [FACE_UPPER_Z] = NEUMANN_INHOMOG_FACE(my_neumann),
+    }},
+    .rhs      = my_rhs,
+    .u_exact  = my_exact,
+    .singular = false,
+},
 \end{lstlisting}
-\textbf{Crucially:} only the \emph{fine grid} requires inhomogeneous
-Dirichlet data.  On coarser levels the unknown is the
-\emph{correction} $e_H$, whose boundary condition is homogeneous
-($e=0$ on $\partial\Omega$) regardless of the original problem.  The
-code already enforces this implicitly: \texttt{vcycle\_3d} zeroes the
-child's \texttt{VAR\_SOL} before recursion, and
-\texttt{prolong\_var\_3d} skips physical boundary points so the fine
-boundary values are preserved across coarse-grid corrections.  The
-recommended pattern is therefore
-\begin{itemize}[leftmargin=*,nosep]
-  \item add a function \texttt{apply\_bc\_3d\_inhomog} that writes
-    $g$ on physical boundaries and call it once for the
-    \emph{root}-level \texttt{VAR\_SOL} during initialisation;
-  \item leave the existing \texttt{apply\_bc\_3d} (with
-    homogeneous values) in place where it is invoked by the smoother
-    and the V-cycle.
-\end{itemize}
 
-\subsection{Neumann, $\partial u/\partial n = q$ on $\partial\Omega$}\label{sec:bc-neumann}
-Neumann boundary conditions are imposed at the discrete level by
-introducing \emph{ghost rows} just outside the physical domain and
-setting them so that the centred difference of the normal derivative
-matches $q$.  For the lower-$x$ boundary this gives
-\begin{equation}\label{eq:neumann-ghost}
-  \frac{u_{1,j,k} - u_{-1,j,k}}{2 h_x} = q(\bx_{0,j,k})
-  \qquad\Longrightarrow\qquad
-  u_{-1,j,k} = u_{1,j,k} - 2 h_x q(\bx_{0,j,k}).
-\end{equation}
-In the present code the ``ghost row outside the physical boundary'' is
-exactly the cell at local index $i=0$ when the rank is on the lower-$x$
-face (because that face has no MPI neighbour to fill the layer).
-Implementing Neumann therefore amounts to:
-\begin{enumerate}[leftmargin=*,nosep]
-  \item In \texttt{apply\_bc\_3d}, instead of zeroing the boundary face,
-    reflect the interior with the offset above, e.g.\
-    \verb|v[i=0] = v[i=2] - 2*hx*q(...)| at lower-$x$, and the
-    symmetric form at upper-$x$.
-  \item Treat the boundary points as \emph{unknowns}: extend the
-    sweep range in \texttt{gauss\_seidel\_3d} and
-    \texttt{calc\_defect\_3d} to include $i=0$ and $i=N_x{-}1$ on
-    physical-boundary ranks.  This requires modifying the loop
-    bounds; the simplest approach is to keep the interior-only
-    sweeps but follow them by an explicit ghost-row update via
-    \eqref{eq:neumann-ghost} that mimics the boundary equation.
-  \item Remove the corresponding \verb|continue| guards in
-    \texttt{prolong\_var\_3d}: with Neumann BCs the boundary
-    correction is non-zero.
-\end{enumerate}
-Pure Neumann conditions render the operator singular up to a constant
-(the constant function lies in the null space).  In that case the
-solution is determined only up to an additive constant, and the
-discrete RHS must satisfy the discrete compatibility condition
-$\int f\, d\bx = \int q\, dS$, i.e.\ the sum of the discrete RHS plus
-the boundary flux contributions must vanish; otherwise the system has
-no solution.  In practice one (i) projects the RHS onto the
-mean-zero subspace each iteration, and (ii) anchors the solution by
-fixing $u$ at one node, or by projecting $u$ onto the mean-zero
-subspace each iteration as well.  See \cite[\S6.4]{briggs2000multigrid}
-and \cite[\S5.6]{trottenberg2001multigrid} for a thorough discussion.
+Step~3: rebuild and run.  No driver edits, no kernel edits.
+\begin{lstlisting}[language=bash]
+cmake --build build -j
+\end{lstlisting}
+
+Step~4: write a TOML that selects the preset and run:
+\begin{lstlisting}[language={}]
+# my_run.toml
+[grid]
+nx_cells = 64
+ny_cells = 64
+nz_cells = 64
+
+[solver]
+multigrid = true
+omega     = 1.0     # 1.0 is robust for Neumann/mixed; 1.5 is fine for pure Dirichlet
+n_smooth  = 50
+n_iters   = 60
+tol       = 1.0e-12
+subcycles = 1
+min_cells = 4
+
+[problem]
+name = "my_mixed_problem"
+
+[output]
+dir = "out_run_001"  # optional; per-rank JSON written here, mkdir -p'd by rank 0
+\end{lstlisting}
+\begin{lstlisting}[language=bash]
+mpirun -np 4 build/src/driver_multigrid my_run.toml
+\end{lstlisting}
+The driver prints a per-iteration $\norm{d}_{\Linf}$ trace and, if a
+\texttt{u\_exact} callback was supplied, the final
+$\norm{u_{h} - u^{\star}}_{\Linf}$.
+
+\subsubsection{Optional: register a CTest convergence check}
+
+If the preset has an exact solution, the convergence-test harness can
+verify that it converges at second order with no further code.  Add
+the preset name to the \verb|CONVERGENCE_PRESETS| list in
+\texttt{src/tests/CMakeLists.txt}:
+\begin{lstlisting}[language={}]
+set(CONVERGENCE_PRESETS
+    manufactured_dirichlet_homog
+    manufactured_dirichlet_inhomog
+    manufactured_neumann_homog
+    manufactured_mixed
+    manufactured_mixed_inhomog
+    my_mixed_problem        # <- new
+)
+\end{lstlisting}
+Re-configure (\verb|cmake -B build-test -DBUILD_TESTING=ON|), build
+the tests, and \verb|ctest --test-dir build-test -R convergence_my_mixed_problem|.
+The harness runs the problem at $32^{3}$, $64^{3}$, $128^{3}$ on
+both \texttt{np=1} and \texttt{np=8}, parses the printed
+$\norm{u_{h} - u^{\star}}_{\Linf}$, and asserts a convergence rate in
+$[1.8, 2.3]$ on the finest pair (see \Cref{sec:tuning} and
+\texttt{tests/run\_test\_convergence.sh}).
+
+\subsubsection{How the preset machinery hooks into the kernel}\label{sec:preset-internals}
+
+Each \texttt{ngfs\_3d} carries a pointer \verb|struct bc_spec_t *bc|.
+The driver stamps the preset's spec onto the root level once at
+startup; \texttt{ngfs\_3d\_create\_child} (\texttt{multigrid.c}) calls
+\texttt{bc\_spec\_homogenize} when constructing each coarse level,
+which copies the parent's \texttt{kind} on every face but flips
+\verb|homogeneous = true| and zeroes the callback pointer.  The
+hard invariant of \Cref{sec:problem} --- coarse levels always carry
+the homogeneous variant of the parent's BC kind, because the unknown
+on a coarse level is the correction $e_{H}$ --- is therefore enforced
+once at hierarchy-construction time and is invisible to the user
+writing a preset.
+
+The boundary kernels read \verb|gfs->bc| directly:
+\begin{itemize}[leftmargin=*,nosep]
+\item \texttt{apply\_bc\_3d} writes Dirichlet face values
+  (\verb|cb(x,y,z,face)| or $0$ when homogeneous) and skips Neumann
+  faces entirely (those are unknowns, updated by the smoother sweep).
+\item \texttt{compute\_sweep\_bounds} (file-static in
+  \texttt{gauss\_seidel.c}) widens the smoother and defect sweeps by
+  one on every face this rank owns that is Neumann; at those
+  boundary nodes, the inner stencil substitutes a ghost-mirror
+  $u_{\text{ghost}} = u_{\text{interior}} + 2 h_n q$ for the
+  off-domain neighbour (and reduces to $u_{\text{ghost}} =
+  u_{\text{interior}}$ on homogeneous Neumann faces).
+\item \texttt{prolong\_var\_3d} skips fine-grid physical boundary
+  nodes only on Dirichlet faces; on Neumann faces the boundary node
+  is an unknown and the correction is prolonged.
+\end{itemize}
 
 \subsection{Robin, $\alpha u + \beta \partial u/\partial n = r$}\label{sec:bc-robin}
 Robin (or third-kind) boundary conditions interpolate between Dirichlet
@@ -931,9 +1070,18 @@ In the code this is implemented by:
 \end{enumerate}
 Note that on coarser levels the BC stays Robin with the \emph{same}
 $\alpha$ and $\beta$ but the homogeneous data $r=0$ for the coarse-grid
-correction, exactly as in the inhomogeneous-Dirichlet case
-(\Cref{sec:bc-dirichlet}).  Robin boundary conditions are also discussed
-in \cite[\S2.3.2]{trottenberg2001multigrid} in the multigrid context.
+correction --- the same homogenisation rule
+\texttt{bc\_spec\_homogenize} already implements for the Dirichlet and
+Neumann kinds (see \Cref{sec:preset-internals}).  In other words,
+adding a Robin BC kind to the preset machinery requires both
+(a)~extending \verb|bc_kind_t| with \verb|BC_ROBIN| (and a callback
+that returns $\alpha$, $\beta$, $r$ at the face point), and
+(b)~teaching the boundary kernels in \texttt{apply\_bc\_3d},
+\texttt{gauss\_seidel\_3d}, \texttt{calc\_defect\_3d}, and
+\texttt{prolong\_var\_3d} how to handle that case.  The first piece is
+purely additive; the second is the bulk of the work.  Robin boundary
+conditions are also discussed in \cite[\S2.3.2]{trottenberg2001multigrid}
+in the multigrid context.
 
 \subsection{Periodic boundary conditions}\label{sec:bc-periodic}
 Periodicity is essentially free: it amounts to (i) flipping the

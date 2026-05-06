@@ -200,6 +200,8 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
 *     tol: double, defect norm below which coarse-grid correction is skipped
 *     subcycles: int, maximum number of coarse-grid sub-cycles per V-cycle
 *         level
+*     verbose: int, 1 = print per-level defect trace and "Starting Vcycle"
+*         banner; 0 = silent
 * Output Variables:
 *     gfs->vars[VAR_SOL]->val: double*, solution updated by smoothing and
 *         coarse-grid correction; if gfs->parent != NULL, also
@@ -210,6 +212,6 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
 *     smoothing steps
 *******************************************************************/
 double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
-                 double tol, int subcycles);
+                 double tol, int subcycles, int verbose);
 
 #endif

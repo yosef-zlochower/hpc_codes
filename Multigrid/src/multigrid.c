@@ -737,12 +737,12 @@ static void vcycle_debug(int rank, int level, const char *fmt, ...)
 *     smoothing steps
 *******************************************************************/
 double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
-                 double tol, int subcycles)
+                 double tol, int subcycles, int verbose)
 {
     const int level = gf_level(gfs);
     const int rank  = gfs->domain.rank;
 
-    if (level == 0 && rank == 0)
+    if (verbose && level == 0 && rank == 0)
     { puts("Starting Vcycle"); fflush(stdout); }
 
     /* Pre-smoothing.  gauss_seidel_3d syncs VAR_SOL on exit. */
@@ -750,11 +750,12 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
 
     /* Compute defect d = Lu - f.  calc_defect_3d syncs VAR_DEF on exit. */
     double defect_norm = calc_defect_3d(gfs);
-    vcycle_debug(rank, level, "defect = %12.6e  (level %d, %ld x %ld x %ld)",
-                 defect_norm, level,
-                 (long)gfs->domain.global_ni - 1,
-                 (long)gfs->domain.global_nj - 1,
-                 (long)gfs->domain.global_nk - 1);
+    if (verbose)
+        vcycle_debug(rank, level, "defect = %12.6e  (level %d, %ld x %ld x %ld)",
+                     defect_norm, level,
+                     (long)gfs->domain.global_ni - 1,
+                     (long)gfs->domain.global_nj - 1,
+                     (long)gfs->domain.global_nk - 1);
 
     if (gfs->child != NULL && defect_norm > tol)
     {
@@ -762,8 +763,9 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
         {
             struct ngfs_3d *child = gfs->child;
 
-            vcycle_debug(rank, level, "restrict at %ld",
-                         (long)gfs->domain.global_ni);
+            if (verbose)
+                vcycle_debug(rank, level, "restrict at %ld",
+                             (long)gfs->domain.global_ni);
 
             /* Zero child correction; apply homogeneous-Dirichlet BCs. */
             memset(child->vars[VAR_SOL]->val, 0, (size_t)child->n * sizeof(double));
@@ -776,7 +778,7 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
 
             /* Recursive V-cycle.  On return, the child has prolonged its
              * correction into gfs->vars[VAR_SOL]. */
-            vcycle_3d(child, n_smooth, omega, tol, subcycles);
+            vcycle_3d(child, n_smooth, omega, tol, subcycles, verbose);
 
             /* Synchronise VAR_SOL ghost zones: prolong_var_3d modifies
              * interior fine-grid points but leaves ghost zones stale at
@@ -809,9 +811,10 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
             gauss_seidel_3d(gfs, n_smooth, 1.0);
 
             defect_norm = calc_defect_3d(gfs);
-            vcycle_debug(rank, level,
-                         "post-smooth defect = %12.6e  (level %d)",
-                         defect_norm, level);
+            if (verbose)
+                vcycle_debug(rank, level,
+                             "post-smooth defect = %12.6e  (level %d)",
+                             defect_norm, level);
 
             if (defect_norm <= tol)
                 break;
@@ -823,8 +826,9 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
      * pre-smooth if the child loop was skipped). */
     if (gfs->parent != NULL)
     {
-        vcycle_debug(rank, level, "prolongate at %ld",
-                     (long)gfs->domain.global_ni);
+        if (verbose)
+            vcycle_debug(rank, level, "prolongate at %ld",
+                         (long)gfs->domain.global_ni);
         prolong_var_3d(gfs, VAR_SOL, gfs->parent, VAR_SOL);
     }
 

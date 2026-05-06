@@ -6,9 +6,39 @@
 #include "multigrid.h"
 #include "multigrid_parameters.h"
 #include "problem.h"
+#include <errno.h>
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+/* Recursive mkdir, like `mkdir -p`.  Returns 0 if the directory
+ * exists (or was created) on return, -1 on a hard failure.  Empty or
+ * NULL `path` is treated as success (cwd already exists).  Used by
+ * the driver to ensure the output directory exists before per-rank
+ * writes -- only rank 0 calls this; the others MPI_Barrier afterward. */
+static int driver_mkdir_p(const char *path)
+{
+    if (!path || !path[0]) return 0;
+
+    char tmp[PARAM_OUTPUT_DIR_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    /* Strip any trailing slashes so we don't try to mkdir "" at the end. */
+    size_t len = strlen(tmp);
+    while (len > 1 && tmp[len-1] == '/') tmp[--len] = '\0';
+
+    /* Walk the path component by component, creating each as we go. */
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -151,7 +181,7 @@ int main(int argc, char **argv)
         if (param.use_multigrid)
         {
             norm = vcycle_3d(&gfs, param.n_smooth, param.omega,
-                             param.tol, param.subcycles);
+                             param.tol, param.subcycles, param.verbose);
         }
         else
         {
@@ -167,6 +197,11 @@ int main(int argc, char **argv)
         if (problem->singular)
             problem_project_mean_zero(&gfs, VAR_SOL);
 
+        /* The per-outer-iteration progress line stays unconditional --
+         * it's a single line per V-cycle (60 lines total for n_iters=60)
+         * and is the primary signal of progress; the verbose flag only
+         * gates the much chattier per-level V-cycle trace inside
+         * vcycle_3d. */
         if (mpi_rank == 0)
             printf("iter %4d  |defect|_inf = %12.6e\n", it, norm);
 
@@ -179,7 +214,23 @@ int main(int argc, char **argv)
     if (mpi_rank == 0 && err >= 0.0)
         printf("\n|u - u_exact|_inf = %12.6e\n", err);
 
-    output_3d_gf(&gfs, 0);
+    /* ---- Per-rank JSON output ----
+     * If [output] dir is set in the TOML, rank 0 mkdirs the directory
+     * and the rest wait at the barrier; all ranks then write their
+     * tile under that directory.  Empty dir = cwd (back-compat). */
+    if (param.output_dir[0] != '\0' && mpi_rank == 0)
+    {
+        if (driver_mkdir_p(param.output_dir) != 0)
+        {
+            fprintf(stderr,
+                    "rank 0: mkdir -p '%s' failed: %s\n",
+                    param.output_dir, strerror(errno));
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+    }
+    MPI_Barrier(gfs.domain.cart_comm);
+
+    output_3d_gf(&gfs, 0, param.output_dir);
 
     /* ---- Cleanup ---- */
     ngfs_3d_deallocate(&gfs);

@@ -83,7 +83,7 @@ int main(int argc, char **argv)
     fill_gf_test_function(&gfs);
     corrupt_gf(&gfs);
     sync_var_2d(&gfs, 0);
-    output_2d_gf(&gfs, 0);
+    output_2d_gf(&gfs, 0, NULL);
 
     /* Also exercise vars[1] to catch variable-offset bugs in sync_var_2d */
     fill_gf_test_function2(&gfs);

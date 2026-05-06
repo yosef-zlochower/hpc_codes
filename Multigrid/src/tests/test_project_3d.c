@@ -244,7 +244,7 @@ int main(int argc, char **argv)
     sync_var_3d(child, 0);
 
     /* Output child data for verification */
-    output_3d_gf(child, 0);
+    output_3d_gf(child, 0, NULL);
 
     ngfs_3d_deallocate(&gfs);
     cleanup_3d_domain(&gfs.domain);

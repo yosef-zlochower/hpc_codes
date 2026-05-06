@@ -229,7 +229,7 @@ int main(int argc, char **argv)
     /* Output parent: interior should be 0; all physical boundary points (lo and
      * hi on every axis) remain at their original f values since prolong never
      * touches them. */
-    output_3d_gf(&gfs, 0);
+    output_3d_gf(&gfs, 0, NULL);
 
     ngfs_3d_deallocate(&gfs);
     cleanup_3d_domain(&gfs.domain);

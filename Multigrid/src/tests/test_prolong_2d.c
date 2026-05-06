@@ -176,7 +176,7 @@ int main(int argc, char **argv)
     /* Output parent for verification: should be 0 except at all physical
      * boundary points (lo and hi on both axes), which are never touched by
      * prolongation so they keep their original f values. */
-    output_2d_gf(&gfs, 0);
+    output_2d_gf(&gfs, 0, NULL);
 
     ngfs_2d_deallocate(&gfs);
     cleanup_2d_domain(&gfs.domain);

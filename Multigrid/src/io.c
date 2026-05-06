@@ -20,16 +20,19 @@
 * Return Values and indicators of success / failure
 *     (none)
 *******************************************************************/
-void output_2d_gf(struct ngfs_2d *gfs, int var)
+void output_2d_gf(struct ngfs_2d *gfs, int var, const char *dir)
 {
-    char fname[128];
+    char fname[256];
+    const char *prefix = (dir && dir[0]) ? dir : ".";
     if (gfs->vars[var]->vname)
     {
-        snprintf(fname, sizeof(fname), "%s_rank_%d.json", gfs->vars[var]->vname, gfs->domain.rank);
+        snprintf(fname, sizeof(fname), "%s/%s_rank_%d.json",
+                 prefix, gfs->vars[var]->vname, gfs->domain.rank);
     }
     else
     {
-        snprintf(fname, sizeof(fname), "VAR_%d_rank_%d.json", var, gfs->domain.rank);
+        snprintf(fname, sizeof(fname), "%s/VAR_%d_rank_%d.json",
+                 prefix, var, gfs->domain.rank);
     }
     FILE *f = fopen(fname, "w");
     if (!f)
@@ -92,16 +95,19 @@ void output_2d_gf(struct ngfs_2d *gfs, int var)
 * Return Values and indicators of success / failure
 *     (none)
 *******************************************************************/
-void output_3d_gf(struct ngfs_3d *gfs, int var)
+void output_3d_gf(struct ngfs_3d *gfs, int var, const char *dir)
 {
-    char fname[128];
+    char fname[256];
+    const char *prefix = (dir && dir[0]) ? dir : ".";
     if (gfs->vars[var]->vname)
     {
-        snprintf(fname, sizeof(fname), "%s_rank_%d.json", gfs->vars[var]->vname, gfs->domain.rank);
+        snprintf(fname, sizeof(fname), "%s/%s_rank_%d.json",
+                 prefix, gfs->vars[var]->vname, gfs->domain.rank);
     }
     else
     {
-        snprintf(fname, sizeof(fname), "VAR_%d_rank_%d.json", var, gfs->domain.rank);
+        snprintf(fname, sizeof(fname), "%s/VAR_%d_rank_%d.json",
+                 prefix, var, gfs->domain.rank);
     }
 
     FILE *f = fopen(fname, "w");

@@ -75,7 +75,7 @@ int main(int argc, char **argv)
     sync_var_2d(&gfs, 0);
 
     /* Output parent (fine) data for verification */
-    output_2d_gf(&gfs, 0);
+    output_2d_gf(&gfs, 0, NULL);
 
     ngfs_2d_deallocate(&gfs);
     cleanup_2d_domain(&gfs.domain);

@@ -79,7 +79,7 @@ int main(int argc, char **argv)
     sync_var_3d(&gfs, 0);
 
     /* Output parent (fine) data for verification */
-    output_3d_gf(&gfs, 0);
+    output_3d_gf(&gfs, 0, NULL);
 
     ngfs_3d_deallocate(&gfs);
     cleanup_3d_domain(&gfs.domain);

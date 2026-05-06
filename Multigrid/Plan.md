@@ -17,6 +17,8 @@
 | Build | Build system migrated from Make to CMake; strictly out-of-tree (no artefacts in `src/`); CTest replaces the hand-rolled test orchestration. Two-level layout: top-level `CMakeLists.txt` at the project root holds project metadata, options, compile flags, MPI discovery, and `enable_testing()`; `src/CMakeLists.txt` contains the target definitions; `src/tests/CMakeLists.txt` declares the test binaries and their CTest entries. CTest tests are labelled `operator` vs `end_to_end` for selective runs. `BUILD_TESTING` defaults **OFF** (production-first build); `-DBUILD_TESTING=ON` is required for `ctest`. Build-tree layout mirrors the source layout: driver lands at `build/src/driver_multigrid`, test binaries at `build-test/src/tests/`. `Makefile` removed. | `CMakeLists.txt` (new top-level), `src/CMakeLists.txt` (new), `src/tests/CMakeLists.txt` (new), `src/Makefile` (removed), `src/CLAUDE.md`, `Documentation.md` (new §10 "Building and running"), `doc/documentation.tex` (new §7 "Building and running the code") |
 | 4.4 | `-ffast-math` is now an explicit CMake option (`MULTIGRID_FAST_MATH`) with an auto-default tied to `BUILD_TESTING`: OFF when `BUILD_TESTING=ON` (strict IEEE so the convergence test measures the discretisation error rather than `-ffast-math` reassociations), ON when `BUILD_TESTING=OFF`. Combined with the `BUILD_TESTING=OFF` default this means the out-of-the-box configuration is a fast production build; the test suite needs `-DBUILD_TESTING=ON` and inherits strict numerics for free. Either default can be overridden explicitly. The configure-time status print (`-- MULTIGRID_FAST_MATH = ON/OFF`) makes the resolved choice unmissable. | `CMakeLists.txt`, `src/CLAUDE.md` |
 | 4.1 | Replaced 12 instances of `if (*_rank > -1)` in `src/comm.c` with the symbolic `if (*_rank != INVALID_RANK)` for consistency with the rest of the codebase (`gauss_seidel.c`, `multigrid.c`). Behaviour-preserving — `domain.c` already converts `MPI_PROC_NULL` to `INVALID_RANK = -1` before storing in the rank fields. | `src/comm.c` |
+| 3.2 | Added `verbose` field to `param_st` (default `false`).  When set via `[solver] verbose = true`, the per-V-cycle "Starting Vcycle" banner and the per-level `defect = ...` / `restrict at ...` / `prolongate at ...` / `post-smooth defect = ...` traces in `vcycle_3d` are printed; otherwise they're silent.  The per-outer-iteration `iter N |defect|_inf` line stays unconditional (one line per V-cycle, primary signal of progress; verbose only gates the chatty per-level trace).  Smoke test: silent run produces 40 lines (header + 30 iter lines + final error), verbose run produces 416 lines for the same problem.  Parser allowlist updated to accept `verbose` under `[solver]`. | `src/multigrid_parameters.{h,cc}`, `src/multigrid.{h,c}`, `src/driver_multigrid.c` |
+| 5.1 | Added `[output] dir = "..."` TOML key (optional, defaults to cwd).  When set, rank 0 calls a `mkdir -p` helper (recursive component-by-component `mkdir`, tolerates `EEXIST`) before any per-rank write, then `MPI_Barrier` ensures every rank sees the directory.  `output_2d_gf` / `output_3d_gf` gained a `const char *dir` parameter; NULL or empty falls back to cwd.  Operator-level test binaries pass `NULL` (back-compat).  Smoke test on np=4 with `dir = "/tmp/mg_out_demo/run_001"`: nested directory auto-created, four `Var0_rank_*.json` files land there, cwd stays clean. | `src/multigrid_parameters.{h,cc}`, `src/io.{h,c}`, `src/driver_multigrid.c`, `src/tests/test_*.c` (10 files) |
 | 6.1, 6.2 | Boundary-plan implemented in four phases (see `Boundary_plan.md`). New `bc_spec_t` per-face BC machinery in `src/bc.{h,c}`; a `problem_t` registry in `src/problem.h` + `src/problem_registry.c` unifies BC kinds, RHS, exact solution, and singular-flag for each preset; `src/problem_helpers.c` provides RHS init, mean-zero projection, and max-error reduction. `apply_bc_3d` writes Dirichlet face values (homogeneous or callback-supplied); the smoother and defect kernels widen their sweep on Neumann faces and substitute a ghost mirror `u_int + 2 h q` (homogeneous when `q_cb == NULL`); `prolong_var_3d` skips only Dirichlet faces. Hierarchy constructor now homogenises the parent's BC spec onto each child via `bc_spec_homogenize`, so coarse levels see the correction problem (homogeneous BCs of the same kind). Driver applies mean-zero projection on `singular` problems. Six presets registered: `manufactured_dirichlet_homog` (default; original behaviour), `manufactured_dirichlet_inhomog` (cos³), `manufactured_neumann_homog` (cos³, singular), `manufactured_neumann_inhomog` (sin³_half, singular — registered but not in the convergence test suite, see "known limitations"), `manufactured_mixed` (x²cos(πy)cos(πz); homogeneous Dirichlet on lower-x, Neumann on the other 5 faces with non-zero q only on upper-x), `manufactured_mixed_inhomog` (e^(x+y+z); 3 inhomogeneous Dirichlet on lower faces + 3 inhomogeneous Neumann on upper faces — every face has non-zero data, exercising the full BC machinery simultaneously; rate 2.000). All 12 CTest entries pass: 6 operator suites + parser hardening + 5 convergence presets at three resolutions × np=1 and np=8, asserting rate ≈ 2 on the finest pair. | `src/bc.{h,c}` (new), `src/problem.h` (new), `src/problem_registry.c` (new), `src/problem_helpers.c` (new), `src/multigrid_parameters.{h,cc}`, `src/driver_multigrid.c`, `src/gauss_seidel.c`, `src/multigrid.c`, `src/gf.{h,c}`, `src/CMakeLists.txt`, `src/tests/{CMakeLists.txt,run_test_convergence.sh}`, `Boundary_plan.md` |
 
 The earlier TOML-reader refactor described in the original plan
@@ -31,36 +33,6 @@ items above were tackled.
 
 Severity-ordered.  Tags: **doc**, **decision**, **robustness**,
 **ergonomics**, **extension**.
-
-### 3. Behaviour worth deciding
-
-#### 3.2 Unconditional V-cycle chatter  *(ergonomics)*
-
-`vcycle_3d` always prints `Starting Vcycle` plus a per-level
-`defect = ...` trace via `vcycle_debug`.  Only rank 0 prints, but there
-is no quiet mode for benchmark or production runs.
-
-**Fix.** Add a `verbose` field to `param_st` (default false), gate the
-prints on it.
-
----
-
-### 5. Output management
-
-#### 5.1 Per-rank JSON spam in `cwd`  *(ergonomics)*
-
-`output_3d_gf` writes `<vname>_rank_<rank>.json` to the current
-directory.  At 1024 ranks this means 1024 files in one directory and
-no run identifier.
-
-**Fix (small).** Read an output directory from the TOML
-(`[output] dir = "out_001"`); rank 0 calls `mkdir -p` and the rest wait
-on `MPI_Barrier`.
-
-**Fix (larger, optional).** Replace per-rank JSON with a single HDF5
-or MPI-IO file.  Useful student exercise; not a must-do.
-
----
 
 ### Known limitations of the boundary-plan implementation
 
@@ -93,28 +65,15 @@ or MPI-IO file.  Useful student exercise; not a must-do.
   red-black SOR ordering at the boundary, or the prolongation needs
   adjustment at Neumann face nodes.  Deferred.
 
-### 7. Remaining cleanup items
-
-#### 3.2 Unconditional V-cycle chatter  *(ergonomics)*
-
-(Same as before — adding a `verbose` flag to `param_st`.)
-
-#### 5.1 Per-rank JSON spam in `cwd`  *(ergonomics)*
-
-(Same as before — adding `[output] dir = "..."` config.)
-
-#### Singular-Neumann compatibility fix *(extension)*
-
-(Documented above; would re-enable the
-`convergence_manufactured_neumann_inhomog` test.)
-
----
-
 ## Suggested order of attack
 
-1. **3.2**, **5.1** — quality-of-life on big runs.
-2. Singular-Neumann compatibility fix — closes the deferred
-   `manufactured_neumann_inhomog` test.
-3. Investigate sub-optimal SOR rate on Neumann boundaries —
+1. Singular-Neumann compatibility fix — closes the deferred
+   `manufactured_neumann_inhomog` test (~30-line change in
+   `problem_helpers.c`).
+2. Investigate sub-optimal SOR rate on Neumann boundaries —
    diagnose whether the smoother kernel, prolongation, or transfer
-   operators degrade at Neumann faces.
+   operators degrade at Neumann faces.  (The `manufactured_mixed_inhomog`
+   test converges fast even at fine h, so the issue is sensitive to the
+   specific manufactured solution — worth a deeper dive.)
+3. Optional: replace per-rank JSON with a single HDF5 or MPI-IO file
+   (mentioned as the "Fix (larger, optional)" under the original §5.1).

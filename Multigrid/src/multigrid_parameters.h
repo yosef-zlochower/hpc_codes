@@ -22,6 +22,11 @@
  * 64 is generous: the longest registered preset is currently 32 chars. */
 #define PARAM_PROBLEM_NAME_MAX 64
 
+/* Maximum length of an output directory path (including NUL).
+ * 256 covers reasonable absolute paths on the cluster filesystems
+ * we run on. */
+#define PARAM_OUTPUT_DIR_MAX 256
+
 struct param_st
 {
     int64_t global_nx_cells; /* number of cells in x; grid points = cells + 1 */
@@ -34,10 +39,18 @@ struct param_st
     int     min_cells;     /* multigrid only */
     double  tol;
     int     use_multigrid; /* 1 = V-cycle multigrid, 0 = Gauss-Seidel */
+    int     verbose;       /* 1 = print "Starting Vcycle" + per-level defect
+                            * trace from vcycle_3d; 0 = silent.  Default 0. */
     char    problem_name[PARAM_PROBLEM_NAME_MAX]; /* problem preset key,
                                                    * defaults to
                                                    * "manufactured_dirichlet_homog"
                                                    * when [problem] is absent */
+    char    output_dir[PARAM_OUTPUT_DIR_MAX];     /* per-rank JSON output
+                                                   * directory; defaults to
+                                                   * "" (cwd) when [output]
+                                                   * is absent.  Driver
+                                                   * mkdir-p's it from rank 0
+                                                   * before writing. */
 };
 
 /* parse_parameter_file is callable from C and C++.  In C++ the

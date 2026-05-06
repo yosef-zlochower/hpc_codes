@@ -48,6 +48,18 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
 
     param->use_multigrid = parameters::get_boolean_value("solver", "multigrid", tbl) ? 1 : 0;
 
+    /* Optional verbosity flag.  Default false: silent run, only the
+     * outer-iteration |defect|_inf and the final error are printed.
+     * Setting [solver].verbose = true enables the per-V-cycle, per-
+     * level defect trace from vcycle_3d. */
+    {
+        const auto solver_tbl = tbl["solver"].as_table();
+        if (solver_tbl && solver_tbl->contains("verbose"))
+            param->verbose = parameters::get_boolean_value("solver", "verbose", tbl) ? 1 : 0;
+        else
+            param->verbose = 0;
+    }
+
     if (param->use_multigrid)
     {
         param->subcycles = parameters::get_positive_integer32_value("solver", "subcycles", tbl);
@@ -90,6 +102,29 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
         param->problem_name[sizeof(param->problem_name) - 1] = '\0';
     }
 
+    /* [output] is optional.  When absent, per-rank JSON files land in
+     * the working directory (back-compat).  When present, the driver
+     * mkdir-p's the named path on rank 0 before writing.  Trailing
+     * slashes are tolerated -- the file-name builder uses "<dir>/<file>". */
+    {
+        const auto output_section = tbl["output"].as_table();
+        std::string dir;
+        if (output_section)
+            dir = parameters::get_string_value("output", "dir", tbl);
+
+        if (dir.size() >= sizeof(param->output_dir))
+        {
+            std::cerr << "invalid output::dir value -- '" << dir
+                      << "' exceeds " << (sizeof(param->output_dir) - 1)
+                      << "-character limit\n";
+            parameters::increment_error();
+            dir.clear();
+        }
+        std::strncpy(param->output_dir, dir.c_str(),
+                     sizeof(param->output_dir) - 1);
+        param->output_dir[sizeof(param->output_dir) - 1] = '\0';
+    }
+
     /* Reject any TOML entry that isn't in the documented schema.  This
      * catches typos like `mulitgrid = true`, which would otherwise be
      * silently ignored: the get_*_value helpers above would not find
@@ -102,14 +137,16 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
      * though they are only consumed when multigrid = true, because we
      * want to allow users to leave them in the file when toggling the
      * solver mode. */
-    parameters::check_known_sections(tbl, { "grid", "solver", "problem" });
+    parameters::check_known_sections(tbl, { "grid", "solver", "problem", "output" });
     parameters::check_known_keys(tbl, "grid",
         { "nx_cells", "ny_cells", "nz_cells" });
     parameters::check_known_keys(tbl, "solver",
         { "multigrid", "omega", "n_smooth", "n_iters", "tol",
-          "subcycles", "min_cells" });
+          "subcycles", "min_cells", "verbose" });
     parameters::check_known_keys(tbl, "problem",
         { "name" });
+    parameters::check_known_keys(tbl, "output",
+        { "dir" });
 
     return parameters::error_count();
 }
