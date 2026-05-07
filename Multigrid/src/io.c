@@ -50,8 +50,8 @@ void output_2d_gf(struct ngfs_2d *gfs, int var, const char *dir)
     fprintf(f, "    \"y0\": %20.16e,\n", gfs->y0);
     fprintf(f, "    \"local_i0\": %ld,\n", (long)gfs->domain.local_i0);
     fprintf(f, "    \"local_j0\": %ld,\n", (long)gfs->domain.local_j0);
-    fprintf(f, "    \"global_ni\": %ld,\n", (long)gfs->domain.global_ni);
-    fprintf(f, "    \"global_nj\": %ld,\n", (long)gfs->domain.global_nj);
+    fprintf(f, "    \"global_cells_x\": %ld,\n", (long)gfs->domain.global_nx_cells);
+    fprintf(f, "    \"global_cells_y\": %ld,\n", (long)gfs->domain.global_ny_cells);
     fprintf(f, "    \"global_x0\": %20.16e,\n", gfs->domain.global_x0);
     fprintf(f, "    \"global_y0\": %20.16e,\n", gfs->domain.global_y0);
     fprintf(f, "    \"rank\": %d,\n", gfs->domain.rank);
@@ -130,9 +130,9 @@ void output_3d_gf(struct ngfs_3d *gfs, int var, const char *dir)
     fprintf(f, "    \"local_i0\": %ld,\n", (long)gfs->domain.local_i0);
     fprintf(f, "    \"local_j0\": %ld,\n", (long)gfs->domain.local_j0);
     fprintf(f, "    \"local_k0\": %ld,\n", (long)gfs->domain.local_k0);
-    fprintf(f, "    \"global_ni\": %ld,\n", (long)gfs->domain.global_ni);
-    fprintf(f, "    \"global_nj\": %ld,\n", (long)gfs->domain.global_nj);
-    fprintf(f, "    \"global_nk\": %ld,\n", (long)gfs->domain.global_nk);
+    fprintf(f, "    \"global_cells_x\": %ld,\n", (long)gfs->domain.global_nx_cells);
+    fprintf(f, "    \"global_cells_y\": %ld,\n", (long)gfs->domain.global_ny_cells);
+    fprintf(f, "    \"global_cells_z\": %ld,\n", (long)gfs->domain.global_nz_cells);
     fprintf(f, "    \"global_x0\": %20.16e,\n", gfs->domain.global_x0);
     fprintf(f, "    \"global_y0\": %20.16e,\n", gfs->domain.global_y0);
     fprintf(f, "    \"global_z0\": %20.16e,\n", gfs->domain.global_z0);

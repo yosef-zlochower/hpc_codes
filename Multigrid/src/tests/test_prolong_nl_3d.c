@@ -25,20 +25,20 @@ int main(int argc, char **argv)
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
-    const int global_nx = atoi(argv[1]);
-    const int global_ny = atoi(argv[2]);
-    const int global_nz = atoi(argv[3]);
+    const int global_nx_cells = atoi(argv[1]);
+    const int global_ny_cells = atoi(argv[2]);
+    const int global_nz_cells = atoi(argv[3]);
 
     size_t dims[3];
-    dims[0] = global_nx;
-    dims[1] = global_ny;
-    dims[2] = global_nz;
+    dims[0] = global_nx_cells;
+    dims[1] = global_ny_cells;
+    dims[2] = global_nz_cells;
     size_t topology[3];
     automatic_topology(3, dims, mpi_size, topology);
 
-    const double dx = 1.0 / (global_nx - 1);
-    const double dy = 1.0 / (global_ny - 1);
-    const double dz = 1.0 / (global_nz - 1);
+    const double dx = 1.0 / global_nx_cells;
+    const double dy = 1.0 / global_ny_cells;
+    const double dz = 1.0 / global_nz_cells;
     const int gs = 2;
     const int nvars = 1;
     const int min_cells = 4;
@@ -47,7 +47,7 @@ int main(int argc, char **argv)
     gfs.vars = NULL;
 
     setup_3d_domain(topology[0], topology[1], topology[2], mpi_rank,
-                    global_nx, global_ny, global_nz,
+                    global_nx_cells, global_ny_cells, global_nz_cells,
                     gs, 0.0, 0.0, 0.0, dx, dy, dz, &gfs.domain);
     ngfs_3d_allocate(nvars, &gfs);
 

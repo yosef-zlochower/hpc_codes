@@ -40,9 +40,11 @@ def verify_zeros(tol=ROUNDOFF_TOLERANCE):
         local_j0 = d["local_j0"]
         local_i0 = d["local_i0"]
 
-        global_ni = d["global_ni"]
-        global_nj = d["global_nj"]
-        global_nk = d.get("global_nk", 1)
+        # JSON now stores cell counts; convert to grid-point counts for the
+        # vertex-centred Dirichlet layout (points = cells + 1).
+        global_ni = d["global_cells_x"] + 1
+        global_nj = d["global_cells_y"] + 1
+        global_nk = d.get("global_cells_z", 0) + 1
 
         gs = d.get("gs", 0)
         lower_x_ghost = d.get("lower_x_ghost", False)

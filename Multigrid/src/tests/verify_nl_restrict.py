@@ -33,11 +33,13 @@ def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
     with open("Var0_rank_0.json") as f:
         d0 = json.load(f)
 
-    global_ni = d0["global_ni"]
-    global_nj = d0["global_nj"]
-    global_nk = d0.get("global_nk", 1)
+    # JSON now stores cell counts; convert to grid-point counts for the
+    # vertex-centred Dirichlet layout (points = cells + 1).
+    global_ni = d0["global_cells_x"] + 1
+    global_nj = d0["global_cells_y"] + 1
+    global_nk = d0.get("global_cells_z", 0) + 1
     mpi_size = d0["mpi_size"]
-    is_3d = "global_nk" in d0
+    is_3d = "global_cells_z" in d0
 
     max_error = 0.0
 

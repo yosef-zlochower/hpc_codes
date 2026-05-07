@@ -29,9 +29,15 @@
 
 struct param_st
 {
-    int64_t global_nx_cells; /* number of cells in x; grid points = cells + 1 */
-    int64_t global_ny_cells; /* number of cells in y; grid points = cells + 1 */
-    int64_t global_nz_cells; /* number of cells in z; grid points = cells + 1 */
+    int64_t global_nx_cells; /* number of physical cells in x */
+    int64_t global_ny_cells; /* number of physical cells in y */
+    int64_t global_nz_cells; /* number of physical cells in z */
+    /* Per-axis Cartesian box bounds.  When [grid] x0/xN/y0/yN/z0/zN are
+     * absent from the TOML they default to 0.0/1.0 (the back-compat
+     * unit cube).  h_a = (b_a - a_a) / N_a is the per-axis spacing. */
+    double  x0, xN;
+    double  y0, yN;
+    double  z0, zN;
     double  omega;
     int     n_smooth;
     int     n_iters;

@@ -33,6 +33,29 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
     param->global_ny_cells = parameters::get_positive_integer64_value("grid", "ny_cells", tbl);
     param->global_nz_cells = parameters::get_positive_integer64_value("grid", "nz_cells", tbl);
 
+    /* Per-axis Cartesian box bounds.  All six are optional; when absent
+     * they default to the unit cube [0,1]^3 (back-compat with every
+     * pre-existing TOML file).  When *any* of the bounds keys is set,
+     * we still read each individually and default the missing ones to
+     * 0.0 / 1.0.  Validation that x0 < xN, etc., happens in the driver
+     * (we don't have access to the bound values here without checking). */
+    {
+        const auto grid_tbl = tbl["grid"].as_table();
+        const bool have = (grid_tbl != nullptr);
+        param->x0 = (have && grid_tbl->contains("x0"))
+                      ? parameters::get_real_value("grid", "x0", tbl) : 0.0;
+        param->xN = (have && grid_tbl->contains("xN"))
+                      ? parameters::get_real_value("grid", "xN", tbl) : 1.0;
+        param->y0 = (have && grid_tbl->contains("y0"))
+                      ? parameters::get_real_value("grid", "y0", tbl) : 0.0;
+        param->yN = (have && grid_tbl->contains("yN"))
+                      ? parameters::get_real_value("grid", "yN", tbl) : 1.0;
+        param->z0 = (have && grid_tbl->contains("z0"))
+                      ? parameters::get_real_value("grid", "z0", tbl) : 0.0;
+        param->zN = (have && grid_tbl->contains("zN"))
+                      ? parameters::get_real_value("grid", "zN", tbl) : 1.0;
+    }
+
     param->omega = parameters::get_positive_real_value("solver", "omega", tbl);
 
     /* The iteration-count fields are `int` because the downstream APIs
@@ -139,7 +162,8 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
      * solver mode. */
     parameters::check_known_sections(tbl, { "grid", "solver", "problem", "output" });
     parameters::check_known_keys(tbl, "grid",
-        { "nx_cells", "ny_cells", "nz_cells" });
+        { "nx_cells", "ny_cells", "nz_cells",
+          "x0", "xN", "y0", "yN", "z0", "zN" });
     parameters::check_known_keys(tbl, "solver",
         { "multigrid", "omega", "n_smooth", "n_iters", "tol",
           "subcycles", "min_cells", "verbose" });

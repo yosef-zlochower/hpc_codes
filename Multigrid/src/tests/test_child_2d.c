@@ -20,20 +20,20 @@ int main(int argc, char **argv)
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
-    const int global_nx = atoi(argv[1]);
-    const int global_ny = atoi(argv[2]);
+    const int global_nx_cells = atoi(argv[1]);
+    const int global_ny_cells = atoi(argv[2]);
 
     size_t dims[2];
-    dims[0] = global_nx;
-    dims[1] = global_ny;
+    dims[0] = global_nx_cells;
+    dims[1] = global_ny_cells;
     size_t topology[2];
     automatic_topology(2, dims, mpi_size, topology);
 
     const int px = topology[0];
     const int py = topology[1];
 
-    const double dx = 1.0 / (global_nx - 1);
-    const double dy = 1.0 / (global_ny - 1);
+    const double dx = 1.0 / global_nx_cells;
+    const double dy = 1.0 / global_ny_cells;
     const double global_x0 = 0.0;
     const double global_y0 = 0.0;
     const int gs = 2;
@@ -43,7 +43,7 @@ int main(int argc, char **argv)
     struct ngfs_2d gfs;
     gfs.vars = NULL;
 
-    setup_2d_domain(px, py, mpi_rank, global_nx, global_ny, gs,
+    setup_2d_domain(px, py, mpi_rank, global_nx_cells, global_ny_cells, gs,
                     global_x0, global_y0, dx, dy, &gfs.domain);
     ngfs_2d_allocate(nvars, &gfs);
 
@@ -91,19 +91,20 @@ int main(int argc, char **argv)
                 MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
             }
 
-            /* Global dimensions follow the coarsening formula */
-            const size_t exp_ni = (par->domain.global_ni - 1) / 2 + 1;
-            const size_t exp_nj = (par->domain.global_nj - 1) / 2 + 1;
-            if (chd->domain.global_ni != exp_ni)
+            /* Global dimensions follow the coarsening formula:
+             * child cell count = parent cell count / 2 (per axis). */
+            const size_t exp_cells_x = par->domain.global_nx_cells / 2;
+            const size_t exp_cells_y = par->domain.global_ny_cells / 2;
+            if (chd->domain.global_nx_cells != (int64_t)exp_cells_x)
             {
-                fprintf(stderr, "Rank %d level %d: global_ni mismatch: got %lu expected %lu\n",
-                        mpi_rank, level, chd->domain.global_ni, exp_ni);
+                fprintf(stderr, "Rank %d level %d: global_nx_cells mismatch: got %lu expected %lu\n",
+                        mpi_rank, level, chd->domain.global_nx_cells, exp_cells_x);
                 MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
             }
-            if (chd->domain.global_nj != exp_nj)
+            if (chd->domain.global_ny_cells != (int64_t)exp_cells_y)
             {
-                fprintf(stderr, "Rank %d level %d: global_nj mismatch: got %lu expected %lu\n",
-                        mpi_rank, level, chd->domain.global_nj, exp_nj);
+                fprintf(stderr, "Rank %d level %d: global_ny_cells mismatch: got %lu expected %lu\n",
+                        mpi_rank, level, chd->domain.global_ny_cells, exp_cells_y);
                 MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
             }
 

@@ -27,9 +27,11 @@ def verify_domain_and_sync(tol=ROUNDOFF_TOLERANCE):
     with open("Var0_rank_0.json", "r") as f:
         d = json.load(f)
 
-    global_ni = d["global_ni"]
-    global_nj = d["global_nj"]
-    global_nk = d.get("global_nk", 1)  # in 2d case, set global_nk to 1
+    # JSON now stores cell counts; convert to grid-point counts for the
+    # vertex-centred Dirichlet layout (points = cells + 1).
+    global_ni = d["global_cells_x"] + 1
+    global_nj = d["global_cells_y"] + 1
+    global_nk = d.get("global_cells_z", 0) + 1  # 2D: 1 plane → 0+1 cells
     global_x0 = d["global_x0"]
     global_y0 = d["global_y0"]
     global_z0 = d.get("global_z0", 0)  # in 2d case, set z=0

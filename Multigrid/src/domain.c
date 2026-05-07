@@ -279,8 +279,8 @@ int setup_1d_domain(const int ncpu_per_direction, const int direction_rank,
 *     0 on success, -1 if MPI_Cart_create returns MPI_COMM_NULL
 *******************************************************************/
 int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
-                    const int rank, const int64_t nx_global,
-                    const int64_t ny_global, const int64_t nz_global,
+                    const int rank, const int64_t global_nx_cells,
+                    const int64_t global_ny_cells, const int64_t global_nz_cells,
                     const int gs, const double global_x0,
                     const double global_y0, const double global_z0,
                     const double dx, const double dy, const double dz,
@@ -288,9 +288,16 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
 {
     struct domain1d_st domain_1d;
 
-    domain->global_ni = nx_global;
-    domain->global_nj = ny_global;
-    domain->global_nk = nz_global;
+    /* Cell counts are the public contract; the per-rank distributor
+     * setup_1d_domain still works in *grid points*, so convert once
+     * here.  For the current vertex-centred Dirichlet layout
+     * grid_points = cells + 1; Phase 2 will make this BC-dependent. */
+    domain->global_nx_cells = global_nx_cells;
+    domain->global_ny_cells = global_ny_cells;
+    domain->global_nz_cells = global_nz_cells;
+    const int64_t nx_points = global_nx_cells + 1;
+    const int64_t ny_points = global_ny_cells + 1;
+    const int64_t nz_points = global_nz_cells + 1;
     domain->gs = gs;
 
     domain->global_x0 = global_x0;
@@ -335,7 +342,7 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
     MPI_Cart_shift(cart_comm, 0, 1, &lower_z, &upper_z);
 
     /* Setup 1D domains as before */
-    setup_1d_domain(nx_cpu, rank_x, nx_global, gs, &domain_1d);
+    setup_1d_domain(nx_cpu, rank_x, nx_points, gs, &domain_1d);
 
     domain->rank = rank;
     domain->local_nx = domain_1d.n;
@@ -345,14 +352,14 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
     domain->lower_x_rank = (lower_x == MPI_PROC_NULL) ? INVALID_RANK : lower_x;
     domain->upper_x_rank = (upper_x == MPI_PROC_NULL) ? INVALID_RANK : upper_x;
 
-    setup_1d_domain(ny_cpu, rank_y, ny_global, gs, &domain_1d);
+    setup_1d_domain(ny_cpu, rank_y, ny_points, gs, &domain_1d);
     domain->local_ny = domain_1d.n;
     domain->local_j0 = domain_1d.local0;
 
     domain->lower_y_rank = (lower_y == MPI_PROC_NULL) ? INVALID_RANK : lower_y;
     domain->upper_y_rank = (upper_y == MPI_PROC_NULL) ? INVALID_RANK : upper_y;
 
-    setup_1d_domain(nz_cpu, rank_z, nz_global, gs, &domain_1d);
+    setup_1d_domain(nz_cpu, rank_z, nz_points, gs, &domain_1d);
     domain->local_nz = domain_1d.n;
     domain->local_k0 = domain_1d.local0;
 
@@ -384,15 +391,18 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
 *     0 on success, -1 if MPI_Cart_create returns MPI_COMM_NULL
 *******************************************************************/
 int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
-                    const int64_t nx_global, const int64_t ny_global,
+                    const int64_t global_nx_cells, const int64_t global_ny_cells,
                     const int gs, const double global_x0, const double global_y0,
                     const double dx, const double dy,
                     struct domain2d_st *domain)
 {
     struct domain1d_st domain_1d;
 
-    domain->global_ni = nx_global;
-    domain->global_nj = ny_global;
+    /* See setup_3d_domain for the cells / points distinction. */
+    domain->global_nx_cells = global_nx_cells;
+    domain->global_ny_cells = global_ny_cells;
+    const int64_t nx_points = global_nx_cells + 1;
+    const int64_t ny_points = global_ny_cells + 1;
     domain->gs = gs;
 
     domain->global_x0 = global_x0;
@@ -433,7 +443,7 @@ int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
     MPI_Cart_shift(cart_comm, 0, 1, &lower_y, &upper_y);
 
     /* Setup 1D domains as before */
-    setup_1d_domain(nx_cpu, rank_x, nx_global, gs, &domain_1d);
+    setup_1d_domain(nx_cpu, rank_x, nx_points, gs, &domain_1d);
 
     domain->rank = rank;
     domain->local_nx = domain_1d.n;
@@ -443,7 +453,7 @@ int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
     domain->lower_x_rank = (lower_x == MPI_PROC_NULL) ? INVALID_RANK : lower_x;
     domain->upper_x_rank = (upper_x == MPI_PROC_NULL) ? INVALID_RANK : upper_x;
 
-    setup_1d_domain(ny_cpu, rank_y, ny_global, gs, &domain_1d);
+    setup_1d_domain(ny_cpu, rank_y, ny_points, gs, &domain_1d);
     domain->local_ny = domain_1d.n;
     domain->local_j0 = domain_1d.local0;
 

@@ -34,8 +34,8 @@ int ngfs_2d_create_child(struct ngfs_2d *parent, int min_cells_per_direction)
     if (!parent || parent->child != NULL)
         return -1;
 
-    const int64_t cells_x = parent->domain.global_ni - 1;
-    const int64_t cells_y = parent->domain.global_nj - 1;
+    const int64_t cells_x = parent->domain.global_nx_cells;
+    const int64_t cells_y = parent->domain.global_ny_cells;
 
     /* Final depth: odd cell count in any direction prevents exact coarsening */
     if (cells_x % 2 != 0 || cells_y % 2 != 0)
@@ -46,8 +46,8 @@ int ngfs_2d_create_child(struct ngfs_2d *parent, int min_cells_per_direction)
     const int ny_cpu = cart_dims[0];
     const int nx_cpu = cart_dims[1];
 
-    const int64_t global_nx_child = cells_x / 2 + 1;
-    const int64_t global_ny_child = cells_y / 2 + 1;
+    const int64_t child_cells_x = cells_x / 2;
+    const int64_t child_cells_y = cells_y / 2;
     const double dx_child = 2.0 * parent->domain.dx;
     const double dy_child = 2.0 * parent->domain.dy;
 
@@ -57,7 +57,7 @@ int ngfs_2d_create_child(struct ngfs_2d *parent, int min_cells_per_direction)
     child->vars = NULL;
 
     if (setup_2d_domain(nx_cpu, ny_cpu, parent->domain.rank,
-                        global_nx_child, global_ny_child,
+                        child_cells_x, child_cells_y,
                         parent->gs,
                         parent->domain.global_x0, parent->domain.global_y0,
                         dx_child, dy_child,
@@ -142,9 +142,9 @@ int ngfs_3d_create_child(struct ngfs_3d *parent, int min_cells_per_direction)
     if (!parent || parent->child != NULL)
         return -1;
 
-    const int64_t cells_x = parent->domain.global_ni - 1;
-    const int64_t cells_y = parent->domain.global_nj - 1;
-    const int64_t cells_z = parent->domain.global_nk - 1;
+    const int64_t cells_x = parent->domain.global_nx_cells;
+    const int64_t cells_y = parent->domain.global_ny_cells;
+    const int64_t cells_z = parent->domain.global_nz_cells;
 
     /* Final depth: odd cell count in any direction prevents exact coarsening */
     if (cells_x % 2 != 0 || cells_y % 2 != 0 || cells_z % 2 != 0)
@@ -156,9 +156,9 @@ int ngfs_3d_create_child(struct ngfs_3d *parent, int min_cells_per_direction)
     const int ny_cpu = cart_dims[1];
     const int nx_cpu = cart_dims[2];
 
-    const int64_t global_nx_child = cells_x / 2 + 1;
-    const int64_t global_ny_child = cells_y / 2 + 1;
-    const int64_t global_nz_child = cells_z / 2 + 1;
+    const int64_t child_cells_x = cells_x / 2;
+    const int64_t child_cells_y = cells_y / 2;
+    const int64_t child_cells_z = cells_z / 2;
     const double dx_child = 2.0 * parent->domain.dx;
     const double dy_child = 2.0 * parent->domain.dy;
     const double dz_child = 2.0 * parent->domain.dz;
@@ -169,7 +169,7 @@ int ngfs_3d_create_child(struct ngfs_3d *parent, int min_cells_per_direction)
     child->vars = NULL;
 
     if (setup_3d_domain(nx_cpu, ny_cpu, nz_cpu, parent->domain.rank,
-                        global_nx_child, global_ny_child, global_nz_child,
+                        child_cells_x, child_cells_y, child_cells_z,
                         parent->gs,
                         parent->domain.global_x0, parent->domain.global_y0,
                         parent->domain.global_z0,
@@ -509,12 +509,14 @@ void prolong_var_2d(struct ngfs_2d *child, int cvar,
      * and read the required child values — ghost zones are valid after
      * sync_var.  Physical boundary points (global index 0 or global_n-1) are
      * never updated so that Dirichlet boundary values are preserved. */
-    const int64_t gni = parent->domain.global_ni;
-    const int64_t gnj = parent->domain.global_nj;
+    /* Last *grid-point* index along each axis equals the cell count for
+     * the current vertex-centred Dirichlet layout (cells = points - 1). */
+    const int64_t gni = parent->domain.global_nx_cells;
+    const int64_t gnj = parent->domain.global_ny_cells;
     for (int64_t jp = pp_lo_y; jp < pp_hi_y; jp++)
     {
         const int64_t pg_y = parent->domain.local_j0 + jp;
-        if (pg_y == 0 || pg_y == gnj - 1) continue;
+        if (pg_y == 0 || pg_y == gnj) continue;
 
         const int y_even = (pg_y % 2 == 0);
         /* For even pg_y: coincident child jc = pg_y/2.
@@ -525,7 +527,7 @@ void prolong_var_2d(struct ngfs_2d *child, int cvar,
         for (int64_t ip = pp_lo_x; ip < pp_hi_x; ip++)
         {
             const int64_t pg_x = parent->domain.local_i0 + ip;
-            if (pg_x == 0 || pg_x == gni - 1) continue;
+            if (pg_x == 0 || pg_x == gni) continue;
 
             const int x_even = (pg_x % 2 == 0);
             const int64_t cg_x = (pg_x + (x_even ? 0 : 1)) / 2;
@@ -600,14 +602,16 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
     const bool skip_lo_z = (!parent->bc || parent->bc->face[FACE_LOWER_Z].kind == BC_DIRICHLET);
     const bool skip_hi_z = (!parent->bc || parent->bc->face[FACE_UPPER_Z].kind == BC_DIRICHLET);
 
-    const int64_t gni3 = parent->domain.global_ni;
-    const int64_t gnj3 = parent->domain.global_nj;
-    const int64_t gnk3 = parent->domain.global_nk;
+    /* Last *grid-point* index along each axis equals the cell count for
+     * the current vertex-centred Dirichlet layout (cells = points - 1). */
+    const int64_t gni3 = parent->domain.global_nx_cells;
+    const int64_t gnj3 = parent->domain.global_ny_cells;
+    const int64_t gnk3 = parent->domain.global_nz_cells;
     for (int64_t kp = pp_lo_z; kp < pp_hi_z; kp++)
     {
         const int64_t pg_z = parent->domain.local_k0 + kp;
-        if (skip_lo_z && pg_z == 0)         continue;
-        if (skip_hi_z && pg_z == gnk3 - 1)  continue;
+        if (skip_lo_z && pg_z == 0)     continue;
+        if (skip_hi_z && pg_z == gnk3)  continue;
 
         const int z_even = (pg_z % 2 == 0);
         const int64_t cg_z = (pg_z + (z_even ? 0 : 1)) / 2;
@@ -616,8 +620,8 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
         for (int64_t jp = pp_lo_y; jp < pp_hi_y; jp++)
         {
             const int64_t pg_y = parent->domain.local_j0 + jp;
-            if (skip_lo_y && pg_y == 0)         continue;
-            if (skip_hi_y && pg_y == gnj3 - 1)  continue;
+            if (skip_lo_y && pg_y == 0)     continue;
+            if (skip_hi_y && pg_y == gnj3)  continue;
 
             const int y_even = (pg_y % 2 == 0);
             const int64_t cg_y = (pg_y + (y_even ? 0 : 1)) / 2;
@@ -626,8 +630,8 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
             for (int64_t ip = pp_lo_x; ip < pp_hi_x; ip++)
             {
                 const int64_t pg_x = parent->domain.local_i0 + ip;
-                if (skip_lo_x && pg_x == 0)         continue;
-                if (skip_hi_x && pg_x == gni3 - 1)  continue;
+                if (skip_lo_x && pg_x == 0)     continue;
+                if (skip_hi_x && pg_x == gni3)  continue;
 
                 const int x_even = (pg_x % 2 == 0);
                 const int64_t cg_x = (pg_x + (x_even ? 0 : 1)) / 2;
@@ -753,9 +757,9 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
     if (verbose)
         vcycle_debug(rank, level, "defect = %12.6e  (level %d, %ld x %ld x %ld)",
                      defect_norm, level,
-                     (long)gfs->domain.global_ni - 1,
-                     (long)gfs->domain.global_nj - 1,
-                     (long)gfs->domain.global_nk - 1);
+                     (long)gfs->domain.global_nx_cells,
+                     (long)gfs->domain.global_ny_cells,
+                     (long)gfs->domain.global_nz_cells);
 
     if (gfs->child != NULL && defect_norm > tol)
     {
@@ -765,7 +769,7 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
 
             if (verbose)
                 vcycle_debug(rank, level, "restrict at %ld",
-                             (long)gfs->domain.global_ni);
+                             (long)gfs->domain.global_nx_cells);
 
             /* Zero child correction; apply homogeneous-Dirichlet BCs. */
             memset(child->vars[VAR_SOL]->val, 0, (size_t)child->n * sizeof(double));
@@ -828,7 +832,7 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
     {
         if (verbose)
             vcycle_debug(rank, level, "prolongate at %ld",
-                         (long)gfs->domain.global_ni);
+                         (long)gfs->domain.global_nx_cells);
         prolong_var_3d(gfs, VAR_SOL, gfs->parent, VAR_SOL);
     }
 

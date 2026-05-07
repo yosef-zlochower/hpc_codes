@@ -38,8 +38,8 @@ struct domain2d_st
     int lower_y_rank; /* rank of lower y neighboor */
     int upper_y_rank; /* rank of upper y neighboor */
     MPI_Comm cart_comm; /* Cartesian communicator */
-    int64_t global_ni; /* dimensions of global grid */
-    int64_t global_nj; /* dimensions of global grid */
+    int64_t global_nx_cells; /* number of cells in x of the global grid */
+    int64_t global_ny_cells; /* number of cells in y of the global grid */
     double global_x0;  /* global minimum x */
     double global_y0;  /* global minimum y */
     double dx;        /* grid spacing */
@@ -64,9 +64,9 @@ struct domain3d_st
     int lower_z_rank; /* rank of lower z neighboor */
     int upper_z_rank; /* rank of upper z neighboor */
     MPI_Comm cart_comm; /* Cartesian communicator */
-    int64_t global_ni; /* dimensions of global grid */
-    int64_t global_nj; /* dimensions of global grid */
-    int64_t global_nk; /* dimensions of global grid */
+    int64_t global_nx_cells; /* number of cells in x of the global grid */
+    int64_t global_ny_cells; /* number of cells in y of the global grid */
+    int64_t global_nz_cells; /* number of cells in z of the global grid */
     double global_x0;  /* global minimum x */
     double global_y0;  /* global minimum y */
     double global_z0;  /* global minimum z */
@@ -105,8 +105,8 @@ int setup_1d_domain(const int ncpu_per_direction, const int direction_rank,
 *     nx_cpu: int, processes in x
 *     ny_cpu: int, processes in y
 *     rank: int, MPI_COMM_WORLD rank of this process
-*     global_nx: int64_t, global grid points in x
-*     global_ny: int64_t, global grid points in y
+*     global_nx_cells: int64_t, global cell count in x
+*     global_ny_cells: int64_t, global cell count in y
 *     gs: int, ghost zone width
 *     global_x0: double, global domain origin in x
 *     global_y0: double, global domain origin in y
@@ -118,7 +118,7 @@ int setup_1d_domain(const int ncpu_per_direction, const int direction_rank,
 *     0 on success, -1 if MPI_Cart_create returns MPI_COMM_NULL
 *******************************************************************/
 int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
-                    const int64_t global_nx, const int64_t global_ny,
+                    const int64_t global_nx_cells, const int64_t global_ny_cells,
                     const int gs, const double global_x0, const double global_y0,
                     const double dx, const double dy,
                     struct domain2d_st *domain);
@@ -133,9 +133,9 @@ int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
 *     ny_cpu: int, processes in y
 *     nz_cpu: int, processes in z
 *     rank: int, MPI_COMM_WORLD rank of this process
-*     global_nx: int64_t, global grid size in x
-*     global_ny: int64_t, global grid size in y
-*     global_nz: int64_t, global grid size in z
+*     global_nx_cells: int64_t, global cell count in x
+*     global_ny_cells: int64_t, global cell count in y
+*     global_nz_cells: int64_t, global cell count in z
 *     gs: int, ghost zone width
 *     global_x0: double, global origin in x
 *     global_y0: double, global origin in y
@@ -149,8 +149,8 @@ int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
 *     0 on success, -1 if MPI_Cart_create returns MPI_COMM_NULL
 *******************************************************************/
 int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
-                    const int rank, const int64_t global_nx,
-                    const int64_t global_ny, const int64_t global_nz,
+                    const int rank, const int64_t global_nx_cells,
+                    const int64_t global_ny_cells, const int64_t global_nz_cells,
                     const int gs, const double global_x0,
                     const double global_y0, const double global_z0,
                     const double dx, const double dy, const double dz,
