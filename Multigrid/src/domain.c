@@ -281,6 +281,7 @@ int setup_1d_domain(const int ncpu_per_direction, const int direction_rank,
 int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
                     const int rank, const int64_t global_nx_cells,
                     const int64_t global_ny_cells, const int64_t global_nz_cells,
+                    const bool neumann_face[6],
                     const int gs, const double global_x0,
                     const double global_y0, const double global_z0,
                     const double dx, const double dy, const double dz,
@@ -288,21 +289,47 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
 {
     struct domain1d_st domain_1d;
 
-    /* Cell counts are the public contract; the per-rank distributor
-     * setup_1d_domain still works in *grid points*, so convert once
-     * here.  For the current vertex-centred Dirichlet layout
-     * grid_points = cells + 1; Phase 2 will make this BC-dependent. */
+    /* Per-face Neumann flags (NULL = all Dirichlet, the legacy
+     * test-suite behaviour). */
+    const bool n_lo_x = neumann_face ? neumann_face[0] : false;
+    const bool n_hi_x = neumann_face ? neumann_face[1] : false;
+    const bool n_lo_y = neumann_face ? neumann_face[2] : false;
+    const bool n_hi_y = neumann_face ? neumann_face[3] : false;
+    const bool n_lo_z = neumann_face ? neumann_face[4] : false;
+    const bool n_hi_z = neumann_face ? neumann_face[5] : false;
+
+    /* An axis is cell-centred *iff both ends are Neumann*.  Hybrid
+     * axes (D-N or N-D) keep the vertex-centred layout in Phase 2 and
+     * use the legacy in-stencil mirror at the Neumann end. */
+    const bool axis_x_cc = n_lo_x && n_hi_x;
+    const bool axis_y_cc = n_lo_y && n_hi_y;
+    const bool axis_z_cc = n_lo_z && n_hi_z;
+
+    /* Cell counts are the public contract; setup_1d_domain works in
+     * *grid points*, so convert once here.  Cell-centred axes (NN-NN)
+     * have N+2 grid points (N interior + 2 ghosts); other axes have
+     * N+1. */
     domain->global_nx_cells = global_nx_cells;
     domain->global_ny_cells = global_ny_cells;
     domain->global_nz_cells = global_nz_cells;
-    const int64_t nx_points = global_nx_cells + 1;
-    const int64_t ny_points = global_ny_cells + 1;
-    const int64_t nz_points = global_nz_cells + 1;
+    const int64_t nx_points = global_nx_cells + (axis_x_cc ? 2 : 1);
+    const int64_t ny_points = global_ny_cells + (axis_y_cc ? 2 : 1);
+    const int64_t nz_points = global_nz_cells + (axis_z_cc ? 2 : 1);
+
+    domain->neumann_lower_x = n_lo_x;
+    domain->neumann_upper_x = n_hi_x;
+    domain->neumann_lower_y = n_lo_y;
+    domain->neumann_upper_y = n_hi_y;
+    domain->neumann_lower_z = n_lo_z;
+    domain->neumann_upper_z = n_hi_z;
     domain->gs = gs;
 
-    domain->global_x0 = global_x0;
-    domain->global_y0 = global_y0;
-    domain->global_z0 = global_z0;
+    /* Global origin: for a cell-centred axis the lowest grid point is
+     * the lower ghost at a - h/2.  For all other layouts the lowest
+     * grid point is at the user's lower bound a. */
+    domain->global_x0 = axis_x_cc ? global_x0 - dx / 2.0 : global_x0;
+    domain->global_y0 = axis_y_cc ? global_y0 - dy / 2.0 : global_y0;
+    domain->global_z0 = axis_z_cc ? global_z0 - dz / 2.0 : global_z0;
 
     domain->dx = dx;
     domain->dy = dy;

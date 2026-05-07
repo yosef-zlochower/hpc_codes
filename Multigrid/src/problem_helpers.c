@@ -12,25 +12,45 @@
 #include <stddef.h>
 
 /* Range over which a variable is "owned" by this rank, i.e. the local
- * indices that hold real data (not MPI ghost cells).  This covers
- * every unknown the solver could be tracking, regardless of BC kind:
- * Dirichlet boundary nodes, Neumann boundary nodes, and interior
- * nodes alike.  Used for whole-domain reductions (mean projection,
- * error norms) where the exact unknown set is operator-dependent and
- * we want a single uniform pass. */
+ * indices that hold real *unknown* data (not MPI ghost cells, not
+ * physical-boundary ghost cells either).  Used for whole-domain
+ * reductions (mean projection, error norms).
+ *
+ * For cell-centred axes (both ends Neumann under CellCentred Phase 2)
+ * the boundary-cell row at index 0 / nx-1 is a *ghost*: its value
+ * u_int + h*q is a slave of the interior cell, not an independent
+ * unknown.  Including it in a reduction over "owned" cells would
+ * bias mean-projections by the per-axis inhomogeneous-Neumann
+ * contribution and contaminate the convergence rate.  For
+ * vertex-centred axes (DD or hybrid in Phase 2) the boundary node
+ * IS the unknown (Dirichlet constraint or Neumann unknown updated
+ * by the smoother), so it stays in.
+ *
+ * MPI-shared faces always trim the gs-wide ghost layer regardless of
+ * BC kind. */
 static inline void owned_bounds_3d(const struct ngfs_3d *gfs,
                                    int64_t *i_lo, int64_t *i_hi,
                                    int64_t *j_lo, int64_t *j_hi,
                                    int64_t *k_lo, int64_t *k_hi)
 {
-    *i_lo = (gfs->domain.lower_x_rank == INVALID_RANK) ? 0 : gfs->gs;
-    *i_hi = (gfs->domain.upper_x_rank == INVALID_RANK) ? gfs->nx
+    const bool x_cc = gfs->domain.neumann_lower_x && gfs->domain.neumann_upper_x;
+    const bool y_cc = gfs->domain.neumann_lower_y && gfs->domain.neumann_upper_y;
+    const bool z_cc = gfs->domain.neumann_lower_z && gfs->domain.neumann_upper_z;
+
+    *i_lo = (gfs->domain.lower_x_rank == INVALID_RANK) ? (x_cc ? 1 : 0)
+                                                       : gfs->gs;
+    *i_hi = (gfs->domain.upper_x_rank == INVALID_RANK) ? (x_cc ? gfs->nx - 1
+                                                              : gfs->nx)
                                                        : gfs->nx - gfs->gs;
-    *j_lo = (gfs->domain.lower_y_rank == INVALID_RANK) ? 0 : gfs->gs;
-    *j_hi = (gfs->domain.upper_y_rank == INVALID_RANK) ? gfs->ny
+    *j_lo = (gfs->domain.lower_y_rank == INVALID_RANK) ? (y_cc ? 1 : 0)
+                                                       : gfs->gs;
+    *j_hi = (gfs->domain.upper_y_rank == INVALID_RANK) ? (y_cc ? gfs->ny - 1
+                                                              : gfs->ny)
                                                        : gfs->ny - gfs->gs;
-    *k_lo = (gfs->domain.lower_z_rank == INVALID_RANK) ? 0 : gfs->gs;
-    *k_hi = (gfs->domain.upper_z_rank == INVALID_RANK) ? gfs->nz
+    *k_lo = (gfs->domain.lower_z_rank == INVALID_RANK) ? (z_cc ? 1 : 0)
+                                                       : gfs->gs;
+    *k_hi = (gfs->domain.upper_z_rank == INVALID_RANK) ? (z_cc ? gfs->nz - 1
+                                                              : gfs->nz)
                                                        : gfs->nz - gfs->gs;
 }
 
@@ -97,13 +117,19 @@ void problem_initialise_rhs(struct ngfs_3d *gfs,
         }
     }
 
-    /* Singular problems (all-Neumann) require a mean-zero RHS for the
-     * compatibility condition int_Omega f = int_dOmega q (with q = 0
-     * here).  In exact arithmetic our manufactured solutions already
-     * satisfy this; the projection guards against round-off and
-     * against future presets that don't. */
-    if (problem->singular)
-        problem_project_mean_zero(gfs, VAR_RHS);
+    /* Singular problems (all-Neumann) require the discrete
+     * compatibility condition sum f_h = sum q/h_normal (in 3D, summed
+     * over every face).  For homogeneous Neumann this collapses to
+     * sum f_h = 0 -- which is what `problem_project_mean_zero` enforces
+     * -- but for inhomogeneous Neumann the boundary contribution is
+     * non-zero, and naively zeroing the mean of f_h breaks the
+     * compatibility.  In the cell-centred discretisation the
+     * continuous compatibility int f = int q transfers to discrete
+     * compatibility automatically (both sides are midpoint-rule
+     * approximations of the same continuous integrals), so we leave
+     * f_h alone and rely on the per-iteration mean-zero projection of
+     * VAR_SOL to control round-off drift along the constant mode. */
+    (void)problem;
 }
 
 void problem_apply_initial_bc(struct ngfs_3d *gfs,

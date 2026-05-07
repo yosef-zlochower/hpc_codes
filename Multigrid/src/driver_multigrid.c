@@ -116,10 +116,24 @@ int main(int argc, char **argv)
     struct ngfs_3d gfs;
     gfs.vars = NULL;
 
+    /* Derive per-face Neumann flags from the preset's bc_spec for the
+     * domain layout.  An axis is cell-centred when both ends are
+     * Neumann; otherwise vertex-centred (DD or hybrid).  Order matches
+     * face_id_t: LOWER_X, UPPER_X, LOWER_Y, UPPER_Y, LOWER_Z, UPPER_Z. */
+    const bool neumann_face[6] = {
+        problem->bc.face[FACE_LOWER_X].kind == BC_NEUMANN,
+        problem->bc.face[FACE_UPPER_X].kind == BC_NEUMANN,
+        problem->bc.face[FACE_LOWER_Y].kind == BC_NEUMANN,
+        problem->bc.face[FACE_UPPER_Y].kind == BC_NEUMANN,
+        problem->bc.face[FACE_LOWER_Z].kind == BC_NEUMANN,
+        problem->bc.face[FACE_UPPER_Z].kind == BC_NEUMANN,
+    };
+
     setup_3d_domain(px, py, pz, mpi_rank,
                     param.global_nx_cells,
                     param.global_ny_cells,
                     param.global_nz_cells,
+                    neumann_face,
                     /*gs=*/1,
                     param.x0, param.y0, param.z0,
                     dx, dy, dz,

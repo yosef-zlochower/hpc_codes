@@ -60,18 +60,22 @@ set(CONVERGENCE_PRESETS
     manufactured_mixed
     manufactured_mixed_inhomog
 )
-# manufactured_neumann_inhomog (all-Neumann + inhomogeneous q) is
-# registered in problem_registry.c but NOT exercised by the convergence
-# test.  Its discrete linear system is inconsistent (a node-centred
-# 7-point Laplacian with ghost-mirror Neumann encoding implies a
-# compatibility condition int f = 2 int q rather than the continuous
-# int f = int q -- a factor-of-2 discrepancy from the half-cell
-# boundary nodes carrying full-cell weight).  GS therefore stagnates
-# instead of converging.  The inhomogeneous Neumann *code path* is
-# still exercised end-to-end by manufactured_mixed (which is
-# non-singular thanks to a Dirichlet face pinning the constant mode);
-# fixing the singular-inhomog case requires a boundary-aware
-# RHS projection that we have deferred.
+# manufactured_neumann_inhomog is registered in problem_registry.c
+# but still NOT in this list -- now for a different reason than
+# pre-CellCentred-Phase-2.  CellCentred Phase 2 fixed the
+# compatibility issue (sum f = sum q/h matches the continuous
+# condition exactly under cell-centred Neumann), and the V-cycle
+# converges geometrically.  However, the simple ghost formula
+# u_ghost = u_int + h*q has O(h^3) ghost truncation, which gives
+# O(h) Laplacian truncation at the boundary cells when the exact
+# solution has non-zero u'''(boundary).  For the homog preset
+# (u = cos(pi x) cos(pi y) cos(pi z)) u'''(0) vanishes by symmetry,
+# so the rate is a clean 2; for the inhomog preset
+# (u = sin(pi x/2) sin(pi y/2) sin(pi z/2)) the rate stays at 2
+# at coarse h but drifts toward 1.5 at h=1/128, just below the
+# verifier's [1.8, 2.3] band.  CellCentred_plan.md Sec 4.2 already
+# describes the 4-point higher-order ghost that fixes this; that's
+# scheduled for Phase 5 (smoother retuning + boundary stencil).
 
 set(VERIFY_SCRIPTS
     verify.py

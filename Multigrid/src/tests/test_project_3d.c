@@ -62,6 +62,7 @@ int main(int argc, char **argv)
     gfs.vars = NULL;
 
     setup_3d_domain(px, py, pz, mpi_rank, global_nx_cells, global_ny_cells, global_nz_cells,
+                    /*neumann_face=*/NULL,
                     gs, global_x0, global_y0, global_z0,
                     dx, dy, dz, &gfs.domain);
     ngfs_3d_allocate(nvars, &gfs);

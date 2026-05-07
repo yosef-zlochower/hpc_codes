@@ -185,6 +185,61 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
                     struct ngfs_3d *parent, int pvar);
 
 /******************************************************************
+* Purpose: Cell-centred restriction from a fine-grid variable to a
+*     coarse-grid variable in 3D, used when every axis of the
+*     hierarchy is cell-centred (an "all-NN" problem from CellCentred
+*     Phase 2).  In the cell-centred layout each coarse cell encloses
+*     exactly eight fine cells; the restriction is the simple
+*     box-average u_H[i,j,k] = (1/8) sum over the 2*2*2 fine cells
+*     enclosed by the coarse cell (i,j,k).  This is the natural
+*     (variational-compatible) cell-centred analogue of the 27-point
+*     full-weighting used by `restrict_var_3d`.
+*
+*     For mixed layouts (some axes cc, some vc) Phase 3 will
+*     introduce a per-axis dispatch; until then, only call this
+*     function when every axis is cell-centred.
+* Input Variables:
+*     parent: struct ngfs_3d*, fine grid
+*     pvar: int, fine-grid variable index
+*     child: struct ngfs_3d*, coarse grid
+*     cvar: int, coarse-grid variable index to write
+* Output Variables:
+*     child->vars[cvar]->val: double*, interior coarse cells written;
+*         coarse ghost cells untouched (set by apply_bc_3d)
+* Return Values and indicators of success / failure
+*     (none)
+*******************************************************************/
+void restrict_var_cc_3d(struct ngfs_3d *parent, int pvar,
+                        struct ngfs_3d *child, int cvar);
+
+/******************************************************************
+* Purpose: Cell-centred prolongation in 3D, the trilinear
+*     interpolation appropriate for an all-cell-centred hierarchy.
+*     Each fine cell receives a weighted sum of eight surrounding
+*     coarse cells: weight (3/4) on the "near" axis (the coarse cell
+*     enclosing the fine cell) and (1/4) on the "far" axis (the
+*     adjacent coarse cell on the same side of the fine cell within
+*     the parent).  Tensor product gives 8 stencil weights summing
+*     to 1.  The fine variable is decremented by the prolongated
+*     correction in place: parent[pvar] -= interp(child[cvar]).
+*
+*     Coarse ghost cells must be valid (apply_bc_3d on the coarse
+*     grid handles this).  Mixed layouts deferred to Phase 3.
+* Input Variables:
+*     child: struct ngfs_3d*, coarse grid
+*     cvar: int, coarse correction variable index
+*     parent: struct ngfs_3d*, fine grid
+*     pvar: int, fine variable index to update
+* Output Variables:
+*     parent->vars[pvar]->val: double*, interior fine-grid cells
+*         decremented by the prolongated correction
+* Return Values and indicators of success / failure
+*     (none)
+*******************************************************************/
+void prolong_var_cc_3d(struct ngfs_3d *child, int cvar,
+                       struct ngfs_3d *parent, int pvar);
+
+/******************************************************************
 * Purpose: Perform one multigrid V-cycle at level `gfs`. Pre-smooths with
 *     n_smooth Gauss-Seidel SOR iterations, computes the defect, and if a
 *     coarser level exists and the defect exceeds tol: zeroes the child

@@ -163,6 +163,25 @@ int ngfs_3d_create_child(struct ngfs_3d *parent, int min_cells_per_direction)
     const double dy_child = 2.0 * parent->domain.dy;
     const double dz_child = 2.0 * parent->domain.dz;
 
+    /* Inherit per-face Neumann flags from the parent (boundary kinds
+     * are a property of the problem, invariant under coarsening). */
+    const bool neumann_face[6] = {
+        parent->domain.neumann_lower_x, parent->domain.neumann_upper_x,
+        parent->domain.neumann_lower_y, parent->domain.neumann_upper_y,
+        parent->domain.neumann_lower_z, parent->domain.neumann_upper_z,
+    };
+
+    /* setup_3d_domain wants the *user-supplied* lower bound a_a, not
+     * the shifted grid origin.  parent->domain.global_x0 holds the
+     * shifted origin (a_x - h_x/2 on cell-centred axes); reverse the
+     * shift before passing it to the child. */
+    const double a_x = parent->domain.global_x0
+        + (parent->domain.neumann_lower_x ? parent->domain.dx * 0.5 : 0.0);
+    const double a_y = parent->domain.global_y0
+        + (parent->domain.neumann_lower_y ? parent->domain.dy * 0.5 : 0.0);
+    const double a_z = parent->domain.global_z0
+        + (parent->domain.neumann_lower_z ? parent->domain.dz * 0.5 : 0.0);
+
     struct ngfs_3d *child = calloc(1, sizeof(struct ngfs_3d));
     if (!child)
         return -1;
@@ -170,9 +189,9 @@ int ngfs_3d_create_child(struct ngfs_3d *parent, int min_cells_per_direction)
 
     if (setup_3d_domain(nx_cpu, ny_cpu, nz_cpu, parent->domain.rank,
                         child_cells_x, child_cells_y, child_cells_z,
+                        neumann_face,
                         parent->gs,
-                        parent->domain.global_x0, parent->domain.global_y0,
-                        parent->domain.global_z0,
+                        a_x, a_y, a_z,
                         dx_child, dy_child, dz_child,
                         &child->domain) != 0)
     {
@@ -669,6 +688,128 @@ void prolong_var_3d(struct ngfs_3d *child, int cvar,
     }
 }
 
+void restrict_var_cc_3d(struct ngfs_3d *parent, int pvar,
+                        struct ngfs_3d *child, int cvar)
+{
+    const int64_t pnx = parent->nx;
+    const int64_t pny = parent->ny;
+    const double *pval = parent->vars[pvar]->val;
+    double *cval = child->vars[cvar]->val;
+
+    const int gs  = child->gs;
+    const int64_t cnx = child->nx;
+    const int64_t cny = child->ny;
+    const int64_t cnz = child->nz;
+
+    /* Iterate over the *interior* coarse cells.  On a boundary rank
+     * the cell-centred layout has its physical ghost at index 0
+     * (lower) or cnx-1 (upper), so the lower interior bound is 1 and
+     * the upper is cnx-1.  On an MPI-shared face the ghost is the
+     * usual gs-wide layer. */
+    const int64_t ic_lo = (child->domain.lower_x_rank != INVALID_RANK) ? gs : 1;
+    const int64_t ic_hi = cnx - ((child->domain.upper_x_rank != INVALID_RANK) ? gs : 1);
+    const int64_t jc_lo = (child->domain.lower_y_rank != INVALID_RANK) ? gs : 1;
+    const int64_t jc_hi = cny - ((child->domain.upper_y_rank != INVALID_RANK) ? gs : 1);
+    const int64_t kc_lo = (child->domain.lower_z_rank != INVALID_RANK) ? gs : 1;
+    const int64_t kc_hi = cnz - ((child->domain.upper_z_rank != INVALID_RANK) ? gs : 1);
+
+    for (int64_t kc = kc_lo; kc < kc_hi; kc++)
+    {
+        /* Coarse cell at child-global index gck encloses fine cells
+         * at parent-global indices 2*gck-1 and 2*gck (cell-centred
+         * coarsening: each coarse cell spans two consecutive fine
+         * cells on every axis). */
+        const int64_t kp_b = 2 * (child->domain.local_k0 + kc) - parent->domain.local_k0;
+        const int64_t kp_a = kp_b - 1;
+        for (int64_t jc = jc_lo; jc < jc_hi; jc++)
+        {
+            const int64_t jp_b = 2 * (child->domain.local_j0 + jc) - parent->domain.local_j0;
+            const int64_t jp_a = jp_b - 1;
+            for (int64_t ic = ic_lo; ic < ic_hi; ic++)
+            {
+                const int64_t ip_b = 2 * (child->domain.local_i0 + ic) - parent->domain.local_i0;
+                const int64_t ip_a = ip_b - 1;
+#define PCC(ii, jj, kk) pval[(ii) + ((jj) + (kk) * pny) * pnx]
+                cval[ic + (jc + kc * cny) * cnx] = 0.125 * (
+                      PCC(ip_a, jp_a, kp_a) + PCC(ip_b, jp_a, kp_a)
+                    + PCC(ip_a, jp_b, kp_a) + PCC(ip_b, jp_b, kp_a)
+                    + PCC(ip_a, jp_a, kp_b) + PCC(ip_b, jp_a, kp_b)
+                    + PCC(ip_a, jp_b, kp_b) + PCC(ip_b, jp_b, kp_b));
+#undef PCC
+            }
+        }
+    }
+}
+
+void prolong_var_cc_3d(struct ngfs_3d *child, int cvar,
+                       struct ngfs_3d *parent, int pvar)
+{
+    const int64_t cnx  = child->nx;
+    const int64_t cny  = child->ny;
+    const int64_t pnx  = parent->nx;
+    const int64_t pny  = parent->ny;
+    const double *cval = child->vars[cvar]->val;
+    double       *pval = parent->vars[pvar]->val;
+
+    const int gs = parent->gs;
+
+    /* Owned fine-cell range.  In the cell-centred layout the lowest
+     * interior fine cell is at local index 1 on a boundary rank (the
+     * physical ghost sits at index 0); on an MPI-shared face the
+     * ghost is the gs-wide layer. */
+    const int64_t pp_lo_x = (parent->domain.lower_x_rank != INVALID_RANK) ? gs : 1;
+    const int64_t pp_hi_x = pnx - ((parent->domain.upper_x_rank != INVALID_RANK) ? gs : 1);
+    const int64_t pp_lo_y = (parent->domain.lower_y_rank != INVALID_RANK) ? gs : 1;
+    const int64_t pp_hi_y = pny - ((parent->domain.upper_y_rank != INVALID_RANK) ? gs : 1);
+    const int64_t pp_lo_z = (parent->domain.lower_z_rank != INVALID_RANK) ? gs : 1;
+    const int64_t pp_hi_z = parent->nz - ((parent->domain.upper_z_rank != INVALID_RANK) ? gs : 1);
+
+    /* For every fine cell at parent-global index gp, the enclosing
+     * coarse cell is gc = (gp + 1) / 2; the fine cell sits at
+     * coarse-relative offset -h/2 (lower half, gp odd) or +h/2
+     * (upper half, gp even).  Trilinear weights: 3/4 toward the
+     * enclosing coarse cell, 1/4 toward the neighbour on the same
+     * side as the fine cell within the coarse cell. */
+    for (int64_t kp = pp_lo_z; kp < pp_hi_z; kp++)
+    {
+        const int64_t gp_z = parent->domain.local_k0 + kp;
+        const int64_t gc_z = (gp_z + 1) / 2;
+        const int64_t kc   = gc_z - child->domain.local_k0;
+        const int     dkn  = (gp_z & 1) ? -1 : +1;   /* odd: lower half */
+
+        for (int64_t jp = pp_lo_y; jp < pp_hi_y; jp++)
+        {
+            const int64_t gp_y = parent->domain.local_j0 + jp;
+            const int64_t gc_y = (gp_y + 1) / 2;
+            const int64_t jc   = gc_y - child->domain.local_j0;
+            const int     djn  = (gp_y & 1) ? -1 : +1;
+
+            for (int64_t ip = pp_lo_x; ip < pp_hi_x; ip++)
+            {
+                const int64_t gp_x = parent->domain.local_i0 + ip;
+                const int64_t gc_x = (gp_x + 1) / 2;
+                const int64_t ic   = gc_x - child->domain.local_i0;
+                const int     din  = (gp_x & 1) ? -1 : +1;
+
+#define CCC(di, dj, dk) cval[(ic+(di)) + ((jc+(dj)) + (kc+(dk)) * cny) * cnx]
+                /* Trilinear sum: weights are products of (3/4) for
+                 * the enclosing coarse cell and (1/4) for the
+                 * same-side neighbour, on each axis. */
+                const double update =
+                      (27.0 / 64.0) *  CCC( 0,   0,   0)
+                    + ( 9.0 / 64.0) * (CCC(din,  0,   0) + CCC( 0,  djn,  0)
+                                     + CCC( 0,   0,  dkn))
+                    + ( 3.0 / 64.0) * (CCC(din, djn,  0) + CCC(din,  0,  dkn)
+                                     + CCC( 0,  djn, dkn))
+                    + ( 1.0 / 64.0) *  CCC(din, djn, dkn);
+#undef CCC
+
+                pval[ip + (jp + kp * pny) * pnx] -= update;
+            }
+        }
+    }
+}
+
 /******************************************************************
 * Purpose: Return the depth of `gfs` in its multigrid hierarchy, where 0 is
 *     the finest (root) level. Determined by counting parent pointers.
@@ -740,6 +881,17 @@ static void vcycle_debug(int rank, int level, const char *fmt, ...)
 *     double, L-infinity norm of the defect at this level after all
 *     smoothing steps
 *******************************************************************/
+/* True iff every axis of this hierarchy level is cell-centred (both
+ * ends Neumann).  All levels of a CellCentred-Phase-2 hierarchy
+ * inherit the same per-axis layout flags from the root, so this
+ * answer is uniform across the V-cycle once the problem is fixed. */
+static inline bool all_axes_cc(const struct ngfs_3d *gfs)
+{
+    return gfs->domain.neumann_lower_x && gfs->domain.neumann_upper_x
+        && gfs->domain.neumann_lower_y && gfs->domain.neumann_upper_y
+        && gfs->domain.neumann_lower_z && gfs->domain.neumann_upper_z;
+}
+
 double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
                  double tol, int subcycles, int verbose)
 {
@@ -776,9 +928,16 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
             apply_bc_3d(child, VAR_SOL);
 
             /* Restrict parent defect → child RHS.
-             * VAR_DEF on gfs is already synced by calc_defect_3d. */
-            inject_var_3d(gfs, VAR_DEF, child, VAR_RHS);
-            restrict_var_3d(gfs, VAR_DEF, child, VAR_RHS);
+             * VAR_DEF on gfs is already synced by calc_defect_3d.
+             * Cell-centred all-NN problems use the box-average
+             * restriction; vertex-centred (or hybrid Phase 2) uses
+             * the historical inject + 27-point full-weighting. */
+            if (all_axes_cc(gfs)) {
+                restrict_var_cc_3d(gfs, VAR_DEF, child, VAR_RHS);
+            } else {
+                inject_var_3d(gfs, VAR_DEF, child, VAR_RHS);
+                restrict_var_3d(gfs, VAR_DEF, child, VAR_RHS);
+            }
 
             /* Recursive V-cycle.  On return, the child has prolonged its
              * correction into gfs->vars[VAR_SOL]. */
@@ -833,7 +992,11 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
         if (verbose)
             vcycle_debug(rank, level, "prolongate at %ld",
                          (long)gfs->domain.global_nx_cells);
-        prolong_var_3d(gfs, VAR_SOL, gfs->parent, VAR_SOL);
+        if (all_axes_cc(gfs)) {
+            prolong_var_cc_3d(gfs, VAR_SOL, gfs->parent, VAR_SOL);
+        } else {
+            prolong_var_3d(gfs, VAR_SOL, gfs->parent, VAR_SOL);
+        }
     }
 
     return defect_norm;

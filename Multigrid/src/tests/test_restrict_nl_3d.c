@@ -48,6 +48,7 @@ int main(int argc, char **argv)
 
     setup_3d_domain(topology[0], topology[1], topology[2], mpi_rank,
                     global_nx_cells, global_ny_cells, global_nz_cells,
+                    /*neumann_face=*/NULL,
                     gs, 0.0, 0.0, 0.0, dx, dy, dz, &gfs.domain);
     ngfs_3d_allocate(nvars, &gfs);
 
