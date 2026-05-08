@@ -298,23 +298,35 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
     const bool n_lo_z = neumann_face ? neumann_face[4] : false;
     const bool n_hi_z = neumann_face ? neumann_face[5] : false;
 
-    /* An axis is cell-centred *iff both ends are Neumann*.  Hybrid
-     * axes (D-N or N-D) keep the vertex-centred layout in Phase 2 and
-     * use the legacy in-stencil mirror at the Neumann end. */
-    const bool axis_x_cc = n_lo_x && n_hi_x;
-    const bool axis_y_cc = n_lo_y && n_hi_y;
-    const bool axis_z_cc = n_lo_z && n_hi_z;
+    /* Phase 3 layout: any axis with at least one Neumann face is
+     * cell-centred -- it has N+2 grid points (N interior cells plus
+     * one extra point at each end).  On a pure D-D axis there is no
+     * extra point at either end and the layout stays at N+1.
+     *
+     * Pure NN: ghost at each end (lowest at a-h/2, highest at b+h/2).
+     * D-N    : Dirichlet vertex at lower end (at exactly a),
+     *          Neumann ghost at upper end (at b+h/2).  The gap
+     *          between vertex and the first interior cell centre is
+     *          h/2 -- the unavoidable half-step (CellCentred_plan.md
+     *          sec. 2.2).
+     * N-D    : mirror of D-N.
+     *
+     * Origin shift: gfs->x0 is set so that the standard formula
+     * x = gfs->x0 + i*dx gives the correct physical coordinate at
+     * every *interior cell centre and at every Neumann ghost*.
+     * Dirichlet vertices on hybrid axes are at coordinate
+     * gfs->x0 + (vertex_index +- 1/2)*dx -- apply_bc_3d handles the
+     * +-h/2 offset explicitly. */
+    const bool axis_x_has_n = n_lo_x || n_hi_x;
+    const bool axis_y_has_n = n_lo_y || n_hi_y;
+    const bool axis_z_has_n = n_lo_z || n_hi_z;
 
-    /* Cell counts are the public contract; setup_1d_domain works in
-     * *grid points*, so convert once here.  Cell-centred axes (NN-NN)
-     * have N+2 grid points (N interior + 2 ghosts); other axes have
-     * N+1. */
     domain->global_nx_cells = global_nx_cells;
     domain->global_ny_cells = global_ny_cells;
     domain->global_nz_cells = global_nz_cells;
-    const int64_t nx_points = global_nx_cells + (axis_x_cc ? 2 : 1);
-    const int64_t ny_points = global_ny_cells + (axis_y_cc ? 2 : 1);
-    const int64_t nz_points = global_nz_cells + (axis_z_cc ? 2 : 1);
+    const int64_t nx_points = global_nx_cells + (axis_x_has_n ? 2 : 1);
+    const int64_t ny_points = global_ny_cells + (axis_y_has_n ? 2 : 1);
+    const int64_t nz_points = global_nz_cells + (axis_z_has_n ? 2 : 1);
 
     domain->neumann_lower_x = n_lo_x;
     domain->neumann_upper_x = n_hi_x;
@@ -324,12 +336,13 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
     domain->neumann_upper_z = n_hi_z;
     domain->gs = gs;
 
-    /* Global origin: for a cell-centred axis the lowest grid point is
-     * the lower ghost at a - h/2.  For all other layouts the lowest
-     * grid point is at the user's lower bound a. */
-    domain->global_x0 = axis_x_cc ? global_x0 - dx / 2.0 : global_x0;
-    domain->global_y0 = axis_y_cc ? global_y0 - dy / 2.0 : global_y0;
-    domain->global_z0 = axis_z_cc ? global_z0 - dz / 2.0 : global_z0;
+    /* Origin shifted by -h/2 whenever the axis has any Neumann face
+     * (so that the standard x = x0 + i*dx formula gives correct cell
+     * coordinates).  Dirichlet vertices are at i=0 (D-N) or i=N+1
+     * (N-D) and need an explicit +-h/2 fix-up in apply_bc. */
+    domain->global_x0 = axis_x_has_n ? global_x0 - dx / 2.0 : global_x0;
+    domain->global_y0 = axis_y_has_n ? global_y0 - dy / 2.0 : global_y0;
+    domain->global_z0 = axis_z_has_n ? global_z0 - dz / 2.0 : global_z0;
 
     domain->dx = dx;
     domain->dy = dy;

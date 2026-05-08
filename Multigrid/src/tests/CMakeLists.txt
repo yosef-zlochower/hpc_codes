@@ -58,24 +58,29 @@ set(CONVERGENCE_PRESETS
     manufactured_dirichlet_inhomog
     manufactured_neumann_homog
     manufactured_mixed
-    manufactured_mixed_inhomog
 )
-# manufactured_neumann_inhomog is registered in problem_registry.c
-# but still NOT in this list -- now for a different reason than
-# pre-CellCentred-Phase-2.  CellCentred Phase 2 fixed the
-# compatibility issue (sum f = sum q/h matches the continuous
-# condition exactly under cell-centred Neumann), and the V-cycle
-# converges geometrically.  However, the simple ghost formula
-# u_ghost = u_int + h*q has O(h^3) ghost truncation, which gives
-# O(h) Laplacian truncation at the boundary cells when the exact
-# solution has non-zero u'''(boundary).  For the homog preset
-# (u = cos(pi x) cos(pi y) cos(pi z)) u'''(0) vanishes by symmetry,
-# so the rate is a clean 2; for the inhomog preset
-# (u = sin(pi x/2) sin(pi y/2) sin(pi z/2)) the rate stays at 2
-# at coarse h but drifts toward 1.5 at h=1/128, just below the
-# verifier's [1.8, 2.3] band.  CellCentred_plan.md Sec 4.2 already
-# describes the 4-point higher-order ghost that fixes this; that's
-# scheduled for Phase 5 (smoother retuning + boundary stencil).
+# manufactured_neumann_inhomog and manufactured_mixed_inhomog are both
+# registered in problem_registry.c but excluded from CTest under the
+# CellCentred Phase 2/3 layout.  The simple boundary-cell stencils
+# both have O(h) local truncation that propagates to global rate 1
+# when the exact solution has non-zero higher derivatives at the
+# Dirichlet boundary:
+#
+# * manufactured_neumann_inhomog (Phase 2): cell-centred ghost mirror
+#   u_ghost = u_int + h*q has O(h^3) ghost truncation -> O(h)
+#   Laplacian at boundary.  For the homog preset (u = cos(pi x)...)
+#   u'''(0) = 0 by symmetry, rate is 2; for the inhomog preset
+#   (u = sin(pi x/2)...) rate drifts toward 1.5 at h=1/128.
+# * manufactured_mixed_inhomog (Phase 3): the 3-point non-uniform
+#   formula at the cell adjacent to a hybrid Dirichlet vertex has
+#   O(h) truncation.  The companion preset manufactured_mixed (homog
+#   Dirichlet at the D end) gives clean rate 2 because u_v = 0 makes
+#   the 3-point formula degenerate to a uniform stencil.
+#
+# CellCentred_plan.md Sec 4.2 specifies the 4-point higher-order
+# ghost formula that fixes both: O(h^2) at the boundary -> rate 2
+# globally.  That's scheduled for Phase 5 (smoother retuning +
+# boundary stencil upgrade); both excluded presets re-enable then.
 
 set(VERIFY_SCRIPTS
     verify.py

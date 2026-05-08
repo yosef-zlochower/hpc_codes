@@ -48,22 +48,31 @@ static inline bc_fn_t neumann_q(const struct ngfs_3d *gfs, face_id_t f)
     return fb->value;
 }
 
-/* An axis is *cell-centred* iff both ends are Neumann.  In that
- * layout the boundary plane lies between the outermost ghost cell
- * (at index 0 / nx-1) and the first interior cell centre (at index 1
- * / nx-2); the smoother sweep stays at its default [gs, nx-gs) range
- * and the in-stencil ghost mirror is *not* used (apply_bc_3d writes
- * the ghost cell directly via u_ghost = u_int + h*q).  Hybrid axes
- * (D-N or N-D) keep the legacy vertex-centred layout in Phase 2 and
- * widen the sweep at the Neumann end so the smoother updates the
- * boundary node via the 2*h*q in-stencil mirror. */
-static inline bool axis_x_cc(const struct ngfs_3d *gfs)
-{ return gfs->domain.neumann_lower_x && gfs->domain.neumann_upper_x; }
-static inline bool axis_y_cc(const struct ngfs_3d *gfs)
-{ return gfs->domain.neumann_lower_y && gfs->domain.neumann_upper_y; }
-static inline bool axis_z_cc(const struct ngfs_3d *gfs)
-{ return gfs->domain.neumann_lower_z && gfs->domain.neumann_upper_z; }
+/* "Has any Neumann face" predicates: an axis with at least one
+ * Neumann face uses the cell-centred-with-extra-point layout
+ * (CellCentred Phase 3).  In that layout the standard formula
+ * x = gfs->x0 + i*dx gives correct coordinates at every interior
+ * cell centre and at every Neumann ghost; Dirichlet vertices on
+ * hybrid axes are at +/- h/2 from the formula's prediction and
+ * apply_bc_3d adjusts explicitly.  Pure D-D axes have no extra
+ * point and no shift -- the formula is exact for both vertices. */
+static inline bool axis_x_neumann(const struct ngfs_3d *gfs)
+{ return gfs->domain.neumann_lower_x || gfs->domain.neumann_upper_x; }
+static inline bool axis_y_neumann(const struct ngfs_3d *gfs)
+{ return gfs->domain.neumann_lower_y || gfs->domain.neumann_upper_y; }
+static inline bool axis_z_neumann(const struct ngfs_3d *gfs)
+{ return gfs->domain.neumann_lower_z || gfs->domain.neumann_upper_z; }
 
+/* Phase 3 unification: every Neumann face -- whether the axis is
+ * pure N-N or hybrid D-N / N-D -- has its ghost row written by
+ * apply_bc_3d via the cell-centred mirror u_ghost = u_int + h*q.  The
+ * smoother and defect kernels consequently never need an in-stencil
+ * mirror substitution; the sweep range is always [gs, nx-gs) and the
+ * 7-point stencil reads the ghost cell as a regular stored value.
+ *
+ * The legacy q-callback / Neumann-flag fields in sweep_bounds_3d are
+ * retained for ABI but are now always false / NULL.  A Phase 4
+ * cleanup will delete them. */
 static struct sweep_bounds_3d compute_sweep_bounds(const struct ngfs_3d *gfs)
 {
     struct sweep_bounds_3d sb;
@@ -72,7 +81,6 @@ static struct sweep_bounds_3d compute_sweep_bounds(const struct ngfs_3d *gfs)
     const int64_t ny = gfs->ny;
     const int64_t nz = gfs->nz;
 
-    /* Default: interior-only sweep, no Neumann mirrors, no q callbacks. */
     sb.i_lo = gs; sb.i_hi = nx - gs;
     sb.j_lo = gs; sb.j_hi = ny - gs;
     sb.k_lo = gs; sb.k_hi = nz - gs;
@@ -82,60 +90,6 @@ static struct sweep_bounds_3d compute_sweep_bounds(const struct ngfs_3d *gfs)
     sb.q_x_lo = sb.q_x_hi = NULL;
     sb.q_y_lo = sb.q_y_hi = NULL;
     sb.q_z_lo = sb.q_z_hi = NULL;
-
-    if (!gfs->bc) return sb;  /* default = homogeneous Dirichlet everywhere */
-
-    /* Hybrid (D-N or N-D) axes: Neumann face widens sweep + mirror.
-     * Cell-centred (N-N) axes: default sweep range, no in-stencil
-     * mirror -- the ghost cell is a real stored value written by
-     * apply_bc_3d. */
-    const bool x_cc = axis_x_cc(gfs);
-    const bool y_cc = axis_y_cc(gfs);
-    const bool z_cc = axis_z_cc(gfs);
-
-    if (gfs->domain.lower_x_rank == INVALID_RANK
-            && gfs->bc->face[FACE_LOWER_X].kind == BC_NEUMANN
-            && !x_cc) {
-        sb.i_lo = 0;
-        sb.nx_lo_neumann = true;
-        sb.q_x_lo = neumann_q(gfs, FACE_LOWER_X);
-    }
-    if (gfs->domain.upper_x_rank == INVALID_RANK
-            && gfs->bc->face[FACE_UPPER_X].kind == BC_NEUMANN
-            && !x_cc) {
-        sb.i_hi = nx;
-        sb.nx_hi_neumann = true;
-        sb.q_x_hi = neumann_q(gfs, FACE_UPPER_X);
-    }
-    if (gfs->domain.lower_y_rank == INVALID_RANK
-            && gfs->bc->face[FACE_LOWER_Y].kind == BC_NEUMANN
-            && !y_cc) {
-        sb.j_lo = 0;
-        sb.ny_lo_neumann = true;
-        sb.q_y_lo = neumann_q(gfs, FACE_LOWER_Y);
-    }
-    if (gfs->domain.upper_y_rank == INVALID_RANK
-            && gfs->bc->face[FACE_UPPER_Y].kind == BC_NEUMANN
-            && !y_cc) {
-        sb.j_hi = ny;
-        sb.ny_hi_neumann = true;
-        sb.q_y_hi = neumann_q(gfs, FACE_UPPER_Y);
-    }
-    if (gfs->domain.lower_z_rank == INVALID_RANK
-            && gfs->bc->face[FACE_LOWER_Z].kind == BC_NEUMANN
-            && !z_cc) {
-        sb.k_lo = 0;
-        sb.nz_lo_neumann = true;
-        sb.q_z_lo = neumann_q(gfs, FACE_LOWER_Z);
-    }
-    if (gfs->domain.upper_z_rank == INVALID_RANK
-            && gfs->bc->face[FACE_UPPER_Z].kind == BC_NEUMANN
-            && !z_cc) {
-        sb.k_hi = nz;
-        sb.nz_hi_neumann = true;
-        sb.q_z_hi = neumann_q(gfs, FACE_UPPER_Z);
-    }
-
     return sb;
 }
 
@@ -197,14 +151,22 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
     const int64_t ny = gfs->ny;
     const int64_t nz = gfs->nz;
 
-    /* Per-axis cell-centred flag: an axis where both ends are
-     * Neumann uses the cell-centred layout, and apply_bc_3d *writes*
-     * the ghost cell at i = 0 / nx-1 via u_ghost = u_int + h*q.  On
-     * vertex-centred axes (DD or hybrid) the Neumann face stays
-     * implicit -- the smoother does the in-stencil mirror. */
-    const bool x_cc = axis_x_cc(gfs);
-    const bool y_cc = axis_y_cc(gfs);
-    const bool z_cc = axis_z_cc(gfs);
+    /* Phase 3 unification: every Neumann face -- whether the axis is
+     * pure N-N, hybrid D-N, or hybrid N-D -- is treated the same way.
+     * apply_bc_3d writes the ghost row via u_ghost = u_int + h*q.
+     *
+     * The axis-shifted-or-not flag controls *coordinate* fix-ups:
+     * - When the axis has at least one Neumann face, gfs->x0 is
+     *   shifted by -h/2 so that the standard formula x = x0 + i*dx
+     *   gives correct cell-centre coordinates.  Dirichlet vertices
+     *   on hybrid axes are at i=0 (D-N) or i=nx-1 (N-D) but their
+     *   *physical* position is at +/-h/2 from the formula's
+     *   prediction; the writes below add the +/-h/2 fix-up.
+     * - When the axis is pure D-D, gfs->x0 is at the box edge and
+     *   the formula is exact for both vertices. */
+    const bool x_neumann_axis = axis_x_neumann(gfs);
+    const bool y_neumann_axis = axis_y_neumann(gfs);
+    const bool z_neumann_axis = axis_z_neumann(gfs);
 
     /* Lower-x face: i = 0 */
     if (gfs->domain.lower_x_rank == INVALID_RANK)
@@ -212,8 +174,10 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         const face_id_t f = FACE_LOWER_X;
         if (face_kind(gfs, f) == BC_DIRICHLET)
         {
+            /* Vertex at i=0.  Pure DD: coord is gfs->x0 = a.  D-N:
+             * gfs->x0 = a-h/2 (shifted), so vertex coord = a = x0 + h/2. */
             const bc_fn_t cb = face_value(gfs, f, var);
-            const double  x  = gfs->x0;            /* i = 0 */
+            const double  x  = gfs->x0 + (x_neumann_axis ? 0.5 * gfs->dx : 0.0);
             if (cb)
             {
                 for (int k = 0; k < nz; k++) {
@@ -231,14 +195,12 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                         v[gf_indx_3d(gfs, 0, j, k)] = 0.0;
             }
         }
-        else if (x_cc)
+        else
         {
-            /* Cell-centred Neumann: write u[0] = u[1] + h_x*q.
-             * Boundary plane is at gfs->x0 + h_x/2 (half-cell above
-             * the ghost-cell coordinate gfs->x0).  q is the *outward*
-             * normal derivative; the lower-x outward normal is -x_hat
-             * so du/dx = -q at the boundary, giving the centred
-             * difference (u[1]-u[0])/h = -q -> u[0] = u[1] + h*q. */
+            /* Cell-centred Neumann ghost: write u[0] = u[1] + h*q.
+             * Boundary plane at gfs->x0 + h/2 = a.  q is the outward
+             * normal derivative; lower-x outward normal is -x_hat, so
+             * (u[1]-u[0])/h = -q -> u[0] = u[1] + h*q. */
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  x_bdy = gfs->x0 + 0.5 * gfs->dx;
             for (int k = 0; k < nz; k++) {
@@ -252,12 +214,6 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                 }
             }
         }
-        else
-        {
-            /* Hybrid axis: Neumann face on a vertex-centred grid.
-             * The smoother widens its sweep here and mirrors via the
-             * in-stencil 2*h*q formula -- no write needed. */
-        }
     }
 
     /* Upper-x face: i = nx-1 */
@@ -266,8 +222,11 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         const face_id_t f = FACE_UPPER_X;
         if (face_kind(gfs, f) == BC_DIRICHLET)
         {
+            /* Vertex at i=nx-1.  Pure DD: coord = x0 + (nx-1)*dx = b.
+             * N-D: x0 + (nx-1)*dx = b+h/2, so vertex coord = b = ... - h/2. */
             const bc_fn_t cb = face_value(gfs, f, var);
-            const double  x  = gfs->x0 + (nx - 1) * gfs->dx;
+            const double  x  = gfs->x0 + (nx - 1) * gfs->dx
+                             - (x_neumann_axis ? 0.5 * gfs->dx : 0.0);
             if (cb)
             {
                 for (int k = 0; k < nz; k++) {
@@ -285,11 +244,11 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                         v[gf_indx_3d(gfs, nx - 1, j, k)] = 0.0;
             }
         }
-        else if (x_cc)
+        else
         {
-            /* Cell-centred Neumann: write u[nx-1] = u[nx-2] + h_x*q.
-             * Upper-x outward normal is +x_hat so du/dx = q;
-             * (u[nx-1] - u[nx-2])/h = q -> u[nx-1] = u[nx-2] + h*q. */
+            /* Cell-centred Neumann ghost: write u[nx-1] = u[nx-2] + h*q.
+             * Upper-x outward normal is +x_hat, so (u[nx-1]-u[nx-2])/h
+             * = q -> u[nx-1] = u[nx-2] + h*q. */
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  x_bdy = gfs->x0 + (nx - 1) * gfs->dx - 0.5 * gfs->dx;
             for (int k = 0; k < nz; k++) {
@@ -303,10 +262,6 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                 }
             }
         }
-        else
-        {
-            /* Hybrid axis: Neumann face on a vertex-centred grid. */
-        }
     }
 
     /* Lower-y face: j = 0 */
@@ -316,7 +271,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         if (face_kind(gfs, f) == BC_DIRICHLET)
         {
             const bc_fn_t cb = face_value(gfs, f, var);
-            const double  y  = gfs->y0;            /* j = 0 */
+            const double  y  = gfs->y0 + (y_neumann_axis ? 0.5 * gfs->dy : 0.0);
             if (cb)
             {
                 for (int k = 0; k < nz; k++) {
@@ -334,7 +289,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                         v[gf_indx_3d(gfs, i, 0, k)] = 0.0;
             }
         }
-        else if (y_cc)
+        else
         {
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  y_bdy = gfs->y0 + 0.5 * gfs->dy;
@@ -349,10 +304,6 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                 }
             }
         }
-        else
-        {
-            /* Hybrid axis: smoother handles the mirror. */
-        }
     }
 
     /* Upper-y face: j = ny-1 */
@@ -362,7 +313,8 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         if (face_kind(gfs, f) == BC_DIRICHLET)
         {
             const bc_fn_t cb = face_value(gfs, f, var);
-            const double  y  = gfs->y0 + (ny - 1) * gfs->dy;
+            const double  y  = gfs->y0 + (ny - 1) * gfs->dy
+                             - (y_neumann_axis ? 0.5 * gfs->dy : 0.0);
             if (cb)
             {
                 for (int k = 0; k < nz; k++) {
@@ -380,7 +332,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                         v[gf_indx_3d(gfs, i, ny - 1, k)] = 0.0;
             }
         }
-        else if (y_cc)
+        else
         {
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  y_bdy = gfs->y0 + (ny - 1) * gfs->dy - 0.5 * gfs->dy;
@@ -395,10 +347,6 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                 }
             }
         }
-        else
-        {
-            /* Hybrid axis: smoother handles the mirror. */
-        }
     }
 
     /* Lower-z face: k = 0 */
@@ -408,7 +356,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         if (face_kind(gfs, f) == BC_DIRICHLET)
         {
             const bc_fn_t cb = face_value(gfs, f, var);
-            const double  z  = gfs->z0;            /* k = 0 */
+            const double  z  = gfs->z0 + (z_neumann_axis ? 0.5 * gfs->dz : 0.0);
             if (cb)
             {
                 for (int j = 0; j < ny; j++) {
@@ -426,7 +374,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                         v[gf_indx_3d(gfs, i, j, 0)] = 0.0;
             }
         }
-        else if (z_cc)
+        else
         {
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  z_bdy = gfs->z0 + 0.5 * gfs->dz;
@@ -441,10 +389,6 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                 }
             }
         }
-        else
-        {
-            /* Hybrid axis: smoother handles the mirror. */
-        }
     }
 
     /* Upper-z face: k = nz-1 */
@@ -454,7 +398,8 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         if (face_kind(gfs, f) == BC_DIRICHLET)
         {
             const bc_fn_t cb = face_value(gfs, f, var);
-            const double  z  = gfs->z0 + (nz - 1) * gfs->dz;
+            const double  z  = gfs->z0 + (nz - 1) * gfs->dz
+                             - (z_neumann_axis ? 0.5 * gfs->dz : 0.0);
             if (cb)
             {
                 for (int j = 0; j < ny; j++) {
@@ -472,7 +417,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                         v[gf_indx_3d(gfs, i, j, nz - 1)] = 0.0;
             }
         }
-        else if (z_cc)
+        else
         {
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  z_bdy = gfs->z0 + (nz - 1) * gfs->dz - 0.5 * gfs->dz;
@@ -486,10 +431,6 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
                     v[kn_1] = v[kn_2] + gfs->dz * q;
                 }
             }
-        }
-        else
-        {
-            /* Hybrid axis: smoother handles the mirror. */
         }
     }
 }
@@ -517,6 +458,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
 *******************************************************************/
 void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
 {
+    const int     gs = gfs->gs;
     const int64_t nx = gfs->nx;
     const int64_t ny = gfs->ny;
     const int64_t nz = gfs->nz;
@@ -546,88 +488,116 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
     const int64_t local_j0 = gfs->domain.local_j0;
     const int64_t local_k0 = gfs->domain.local_k0;
 
-    /* Per-rank sweep bounds: widened by one on every Neumann face this
-     * rank owns.  Dirichlet faces and faces shared with an MPI
-     * neighbour keep the [gs, n-gs) interior-only range. */
+    /* Sweep range: under CellCentred Phase 3 every Neumann face has
+     * its ghost row written by apply_bc_3d before each sweep, so the
+     * smoother always stays inside [gs, nx-gs).  compute_sweep_bounds
+     * preserves the legacy in-stencil-mirror flags as `false` for
+     * ABI continuity; they are retained as dead branches in the
+     * kernel below and will be removed in a Phase 4 cleanup. */
     const struct sweep_bounds_3d sb = compute_sweep_bounds(gfs);
 
-    /* Pre-compute the constant face-coordinates used by the q-callback
-     * lookup at boundary nodes.  Outside the boundary planes these are
-     * unused; computing them once avoids re-deriving them inside the
-     * hot loop. */
-    const double x_face_lo = gfs->x0;
-    const double x_face_hi = gfs->x0 + (nx - 1) * gfs->dx;
-    const double y_face_lo = gfs->y0;
-    const double y_face_hi = gfs->y0 + (ny - 1) * gfs->dy;
-    const double z_face_lo = gfs->z0;
-    const double z_face_hi = gfs->z0 + (nz - 1) * gfs->dz;
-    (void)y_face_lo; (void)y_face_hi;  /* Used only by mirrors below */
-    (void)z_face_lo; (void)z_face_hi;
-    (void)x_face_lo; (void)x_face_hi;
+    (void)sb;  /* mirror flags unused in Phase 3; kept in struct for ABI */
 
-    /* Mirror neighbour at a Neumann boundary face.
-     *   u_ghost = u_interior_neighbour + 2 * h * q(face point)
-     * with q = du/dn (outward-normal derivative).  q_cb may be NULL
-     * for homogeneous Neumann; in that case the 2 h q term vanishes
-     * and the formula reduces to u_ghost = u_interior. */
-    #define NEUMANN_MIRROR(u_int_neighbour, h, q_cb, x_arg, y_arg, z_arg, face_id)   \
-        ((q_cb) ? ((u_int_neighbour) + 2.0 * (h) * (q_cb)((x_arg),(y_arg),(z_arg),(face_id))) \
-                : (u_int_neighbour))
+    /* Hybrid axis flags: a hybrid axis has D on one end and N on
+     * the other.  At the cell adjacent to the D vertex the gap to
+     * the vertex is h/2 rather than h, and the standard 7-point
+     * stencil is replaced on that axis by the non-uniform formula
+     *   u_xx ~= (4/(3 h^2)) * (2 u_v - 3 u_self + u_far).
+     * (CellCentred_plan.md sec. 4.2.) */
+    const bool x_lower_d_v = (gfs->domain.lower_x_rank == INVALID_RANK)
+                          && !gfs->domain.neumann_lower_x
+                          &&  gfs->domain.neumann_upper_x;
+    const bool x_upper_d_v = (gfs->domain.upper_x_rank == INVALID_RANK)
+                          &&  gfs->domain.neumann_lower_x
+                          && !gfs->domain.neumann_upper_x;
+    const bool y_lower_d_v = (gfs->domain.lower_y_rank == INVALID_RANK)
+                          && !gfs->domain.neumann_lower_y
+                          &&  gfs->domain.neumann_upper_y;
+    const bool y_upper_d_v = (gfs->domain.upper_y_rank == INVALID_RANK)
+                          &&  gfs->domain.neumann_lower_y
+                          && !gfs->domain.neumann_upper_y;
+    const bool z_lower_d_v = (gfs->domain.lower_z_rank == INVALID_RANK)
+                          && !gfs->domain.neumann_lower_z
+                          &&  gfs->domain.neumann_upper_z;
+    const bool z_upper_d_v = (gfs->domain.upper_z_rank == INVALID_RANK)
+                          &&  gfs->domain.neumann_lower_z
+                          && !gfs->domain.neumann_upper_z;
+
+    /* Inverse-h^2 constants for the non-uniform stencil's slow path. */
+    const double inv_dx2 = 1.0 / dx2;
+    const double inv_dy2 = 1.0 / dy2;
+    const double inv_dz2 = 1.0 / dz2;
+
+    /* Compute the SOR update at one cell, including the per-axis
+     * non-uniform stencil at cells adjacent to a hybrid Dirichlet
+     * vertex (the gap on the D side is h/2, not h).  Most cells take
+     * the fast path (precomputed cx, cy, cz, cs).  The slow path is
+     * triggered only at i in {1, nx-2} on a hybrid x axis, etc. --
+     * O(N^2) cells out of O(N^3). */
+    #define APPLY_SOR_3D(idx_, i_, j_, k_)                                                 \
+        do {                                                                                \
+            const double u_xm_ = u[(idx_) - 1];                                            \
+            const double u_xp_ = u[(idx_) + 1];                                            \
+            const double u_ym_ = u[(idx_) - stride_y];                                     \
+            const double u_yp_ = u[(idx_) + stride_y];                                     \
+            const double u_zm_ = u[(idx_) - stride_z];                                     \
+            const double u_zp_ = u[(idx_) + stride_z];                                     \
+            const bool x_sp_ = ((i_) == 1 && x_lower_d_v) || ((i_) == nx - 2 && x_upper_d_v); \
+            const bool y_sp_ = ((j_) == 1 && y_lower_d_v) || ((j_) == ny - 2 && y_upper_d_v); \
+            const bool z_sp_ = ((k_) == 1 && z_lower_d_v) || ((k_) == nz - 2 && z_upper_d_v); \
+            double u_new_;                                                                  \
+            if (!x_sp_ && !y_sp_ && !z_sp_) {                                              \
+                u_new_ = cx * (u_xp_ + u_xm_) + cy * (u_yp_ + u_ym_)                       \
+                       + cz * (u_zp_ + u_zm_) - cs * rhs[(idx_)];                          \
+            } else {                                                                        \
+                /* Finite-volume non-uniform stencil at the cell adjacent \
+                 * to a hybrid Dirichlet vertex.  Cell-averaged Laplacian \
+                 * (1/h) * (u'(right_face) - u'(left_face)) with: \
+                 *   right face (interior): centred (u_far - u_self)/h \
+                 *   left  face (vertex):  one-sided (u_self - u_v)/(h/2) = 2(u_self-u_v)/h \
+                 * gives  (2 u_v - 3 u_self + u_far)/h^2.  Diagonal coeff \
+                 * is -3 (vs. -2 for uniform); off-diagonal is 2*u_v + u_far. */ \
+                double diag_x_ = 2.0, off_x_ = u_xm_ + u_xp_;                              \
+                if (x_sp_) {                                                                \
+                    diag_x_ = 3.0;                                                          \
+                    if ((i_) == 1) off_x_ = 2.0 * u_xm_ + u_xp_;                            \
+                    else           off_x_ = 2.0 * u_xp_ + u_xm_;                            \
+                }                                                                           \
+                double diag_y_ = 2.0, off_y_ = u_ym_ + u_yp_;                              \
+                if (y_sp_) {                                                                \
+                    diag_y_ = 3.0;                                                          \
+                    if ((j_) == 1) off_y_ = 2.0 * u_ym_ + u_yp_;                            \
+                    else           off_y_ = 2.0 * u_yp_ + u_ym_;                            \
+                }                                                                           \
+                double diag_z_ = 2.0, off_z_ = u_zm_ + u_zp_;                              \
+                if (z_sp_) {                                                                \
+                    diag_z_ = 3.0;                                                          \
+                    if ((k_) == 1) off_z_ = 2.0 * u_zm_ + u_zp_;                            \
+                    else           off_z_ = 2.0 * u_zp_ + u_zm_;                            \
+                }                                                                           \
+                const double diag_ = diag_x_ * inv_dx2 + diag_y_ * inv_dy2 + diag_z_ * inv_dz2; \
+                const double off_  = off_x_  * inv_dx2 + off_y_  * inv_dy2 + off_z_  * inv_dz2; \
+                u_new_ = (off_ - rhs[(idx_)]) / diag_;                                      \
+            }                                                                               \
+            u[(idx_)] = (1.0 - omega) * u[(idx_)] + omega * u_new_;                        \
+        } while (0)
 
     for (int iter = 0; iter < n_smooth; iter++)
     {
         /* ---- Red sweep ---- */
-        for (int64_t k = sb.k_lo; k < sb.k_hi; k++)
+        for (int64_t k = gs; k < nz - gs; k++)
         {
-            const bool   k_at_lo = (k == 0);
-            const bool   k_at_hi = (k == nz - 1);
-            const double z       = gfs->z0 + k * gfs->dz;
-            for (int64_t j = sb.j_lo; j < sb.j_hi; j++)
+            for (int64_t j = gs; j < ny - gs; j++)
             {
-                const bool   j_at_lo = (j == 0);
-                const bool   j_at_hi = (j == ny - 1);
-                const double y       = gfs->y0 + j * gfs->dy;
                 /* Red points have (global_i + global_j + global_k) even. */
                 const int jk_parity      = (local_j0 + j + local_k0 + k) % 2;
-                const int first_is_black = (local_i0 + sb.i_lo + jk_parity) % 2;
-                const int64_t red_start  = sb.i_lo + first_is_black;
+                const int first_is_black = (local_i0 + gs + jk_parity) % 2;
+                const int64_t red_start  = gs + first_is_black;
 
-                for (int64_t i = red_start; i < sb.i_hi; i += 2)
+                for (int64_t i = red_start; i < nx - gs; i += 2)
                 {
                     const int64_t idx = i + (j + k * ny) * nx;
-                    const double  x   = gfs->x0 + i * gfs->dx;
-
-                    const double u_xm = (i == 0      && sb.nx_lo_neumann)
-                        ? NEUMANN_MIRROR(u[idx + 1], gfs->dx, sb.q_x_lo,
-                                         x_face_lo, y, z, FACE_LOWER_X)
-                        : u[idx - 1];
-                    const double u_xp = (i == nx - 1 && sb.nx_hi_neumann)
-                        ? NEUMANN_MIRROR(u[idx - 1], gfs->dx, sb.q_x_hi,
-                                         x_face_hi, y, z, FACE_UPPER_X)
-                        : u[idx + 1];
-                    const double u_ym = (j_at_lo     && sb.ny_lo_neumann)
-                        ? NEUMANN_MIRROR(u[idx + stride_y], gfs->dy, sb.q_y_lo,
-                                         x, y_face_lo, z, FACE_LOWER_Y)
-                        : u[idx - stride_y];
-                    const double u_yp = (j_at_hi     && sb.ny_hi_neumann)
-                        ? NEUMANN_MIRROR(u[idx - stride_y], gfs->dy, sb.q_y_hi,
-                                         x, y_face_hi, z, FACE_UPPER_Y)
-                        : u[idx + stride_y];
-                    const double u_zm = (k_at_lo     && sb.nz_lo_neumann)
-                        ? NEUMANN_MIRROR(u[idx + stride_z], gfs->dz, sb.q_z_lo,
-                                         x, y, z_face_lo, FACE_LOWER_Z)
-                        : u[idx - stride_z];
-                    const double u_zp = (k_at_hi     && sb.nz_hi_neumann)
-                        ? NEUMANN_MIRROR(u[idx - stride_z], gfs->dz, sb.q_z_hi,
-                                         x, y, z_face_hi, FACE_UPPER_Z)
-                        : u[idx + stride_z];
-
-                    const double u_new =
-                          cx * (u_xp + u_xm)
-                        + cy * (u_yp + u_ym)
-                        + cz * (u_zp + u_zm)
-                        - cs * rhs[idx];
-                    u[idx] = (1.0 - omega) * u[idx] + omega * u_new;
+                    APPLY_SOR_3D(idx, i, j, k);
                 }
             }
         }
@@ -635,56 +605,18 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
         apply_bc_3d(gfs, VAR_SOL);
 
         /* ---- Black sweep ---- */
-        for (int64_t k = sb.k_lo; k < sb.k_hi; k++)
+        for (int64_t k = gs; k < nz - gs; k++)
         {
-            const bool   k_at_lo = (k == 0);
-            const bool   k_at_hi = (k == nz - 1);
-            const double z       = gfs->z0 + k * gfs->dz;
-            for (int64_t j = sb.j_lo; j < sb.j_hi; j++)
+            for (int64_t j = gs; j < ny - gs; j++)
             {
-                const bool   j_at_lo = (j == 0);
-                const bool   j_at_hi = (j == ny - 1);
-                const double y       = gfs->y0 + j * gfs->dy;
                 const int jk_parity       = (local_j0 + j + local_k0 + k) % 2;
-                const int first_is_black  = (local_i0 + sb.i_lo + jk_parity) % 2;
-                const int64_t black_start = sb.i_lo + 1 - first_is_black;
+                const int first_is_black  = (local_i0 + gs + jk_parity) % 2;
+                const int64_t black_start = gs + 1 - first_is_black;
 
-                for (int64_t i = black_start; i < sb.i_hi; i += 2)
+                for (int64_t i = black_start; i < nx - gs; i += 2)
                 {
                     const int64_t idx = i + (j + k * ny) * nx;
-                    const double  x   = gfs->x0 + i * gfs->dx;
-
-                    const double u_xm = (i == 0      && sb.nx_lo_neumann)
-                        ? NEUMANN_MIRROR(u[idx + 1], gfs->dx, sb.q_x_lo,
-                                         x_face_lo, y, z, FACE_LOWER_X)
-                        : u[idx - 1];
-                    const double u_xp = (i == nx - 1 && sb.nx_hi_neumann)
-                        ? NEUMANN_MIRROR(u[idx - 1], gfs->dx, sb.q_x_hi,
-                                         x_face_hi, y, z, FACE_UPPER_X)
-                        : u[idx + 1];
-                    const double u_ym = (j_at_lo     && sb.ny_lo_neumann)
-                        ? NEUMANN_MIRROR(u[idx + stride_y], gfs->dy, sb.q_y_lo,
-                                         x, y_face_lo, z, FACE_LOWER_Y)
-                        : u[idx - stride_y];
-                    const double u_yp = (j_at_hi     && sb.ny_hi_neumann)
-                        ? NEUMANN_MIRROR(u[idx - stride_y], gfs->dy, sb.q_y_hi,
-                                         x, y_face_hi, z, FACE_UPPER_Y)
-                        : u[idx + stride_y];
-                    const double u_zm = (k_at_lo     && sb.nz_lo_neumann)
-                        ? NEUMANN_MIRROR(u[idx + stride_z], gfs->dz, sb.q_z_lo,
-                                         x, y, z_face_lo, FACE_LOWER_Z)
-                        : u[idx - stride_z];
-                    const double u_zp = (k_at_hi     && sb.nz_hi_neumann)
-                        ? NEUMANN_MIRROR(u[idx - stride_z], gfs->dz, sb.q_z_hi,
-                                         x, y, z_face_hi, FACE_UPPER_Z)
-                        : u[idx + stride_z];
-
-                    const double u_new =
-                          cx * (u_xp + u_xm)
-                        + cy * (u_yp + u_ym)
-                        + cz * (u_zp + u_zm)
-                        - cs * rhs[idx];
-                    u[idx] = (1.0 - omega) * u[idx] + omega * u_new;
+                    APPLY_SOR_3D(idx, i, j, k);
                 }
             }
         }
@@ -692,7 +624,7 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
         apply_bc_3d(gfs, VAR_SOL);
     }
 
-    #undef NEUMANN_MIRROR
+    #undef APPLY_SOR_3D
 }
 
 /******************************************************************
@@ -714,6 +646,7 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
 *******************************************************************/
 double calc_defect_3d(struct ngfs_3d *gfs)
 {
+    const int     gs = gfs->gs;
     const int64_t nx = gfs->nx;
     const int64_t ny = gfs->ny;
     const int64_t nz = gfs->nz;
@@ -729,75 +662,78 @@ double calc_defect_3d(struct ngfs_3d *gfs)
     double *rhs = gfs->vars[VAR_RHS]->val;
     double *def = gfs->vars[VAR_DEF]->val;
 
-    /* Sweep range mirrors the smoother's: include Neumann boundary
-     * nodes (their defect is the residual of the boundary equation,
-     * encoded via the same ghost-row substitution the smoother uses),
-     * exclude Dirichlet boundary nodes (whose defect is identically
-     * zero -- apply_bc_3d below writes 0 there). */
-    const struct sweep_bounds_3d sb = compute_sweep_bounds(gfs);
-
-    /* Constant face-coordinates used by the q-callback at boundary
-     * nodes.  Only relevant on inhomogeneous Neumann faces. */
-    const double x_face_lo = gfs->x0;
-    const double x_face_hi = gfs->x0 + (nx - 1) * gfs->dx;
-    const double y_face_lo = gfs->y0;
-    const double y_face_hi = gfs->y0 + (ny - 1) * gfs->dy;
-    const double z_face_lo = gfs->z0;
-    const double z_face_hi = gfs->z0 + (nz - 1) * gfs->dz;
-
-    /* Same ghost-mirror formula as the smoother kernel; q_cb is NULL
-     * on homogeneous Neumann faces, in which case the 2 h q term
-     * vanishes. */
-    #define NEUMANN_MIRROR(u_int_neighbour, h, q_cb, x_arg, y_arg, z_arg, face_id)   \
-        ((q_cb) ? ((u_int_neighbour) + 2.0 * (h) * (q_cb)((x_arg),(y_arg),(z_arg),(face_id))) \
-                : (u_int_neighbour))
+    /* Hybrid axis flags (see gauss_seidel_3d for details); used to
+     * apply the non-uniform 3-point stencil at the cell adjacent to
+     * a Dirichlet vertex. */
+    const bool x_lower_d_v = (gfs->domain.lower_x_rank == INVALID_RANK)
+                          && !gfs->domain.neumann_lower_x
+                          &&  gfs->domain.neumann_upper_x;
+    const bool x_upper_d_v = (gfs->domain.upper_x_rank == INVALID_RANK)
+                          &&  gfs->domain.neumann_lower_x
+                          && !gfs->domain.neumann_upper_x;
+    const bool y_lower_d_v = (gfs->domain.lower_y_rank == INVALID_RANK)
+                          && !gfs->domain.neumann_lower_y
+                          &&  gfs->domain.neumann_upper_y;
+    const bool y_upper_d_v = (gfs->domain.upper_y_rank == INVALID_RANK)
+                          &&  gfs->domain.neumann_lower_y
+                          && !gfs->domain.neumann_upper_y;
+    const bool z_lower_d_v = (gfs->domain.lower_z_rank == INVALID_RANK)
+                          && !gfs->domain.neumann_lower_z
+                          &&  gfs->domain.neumann_upper_z;
+    const bool z_upper_d_v = (gfs->domain.upper_z_rank == INVALID_RANK)
+                          &&  gfs->domain.neumann_lower_z
+                          && !gfs->domain.neumann_upper_z;
 
     double local_max = 0.0;
 
-    for (int64_t k = sb.k_lo; k < sb.k_hi; k++)
+    for (int64_t k = gs; k < nz - gs; k++)
     {
-        const bool   k_at_lo = (k == 0);
-        const bool   k_at_hi = (k == nz - 1);
-        const double z       = gfs->z0 + k * gfs->dz;
-        for (int64_t j = sb.j_lo; j < sb.j_hi; j++)
+        for (int64_t j = gs; j < ny - gs; j++)
         {
-            const bool   j_at_lo = (j == 0);
-            const bool   j_at_hi = (j == ny - 1);
-            const double y       = gfs->y0 + j * gfs->dy;
-            for (int64_t i = sb.i_lo; i < sb.i_hi; i++)
+            for (int64_t i = gs; i < nx - gs; i++)
             {
                 const int64_t idx = i + (j + k * ny) * nx;
-                const double  x   = gfs->x0 + i * gfs->dx;
+                const double  u_self = u[idx];
+                const double  u_xm = u[idx - 1];
+                const double  u_xp = u[idx + 1];
+                const double  u_ym = u[idx - stride_y];
+                const double  u_yp = u[idx + stride_y];
+                const double  u_zm = u[idx - stride_z];
+                const double  u_zp = u[idx + stride_z];
 
-                const double u_xm = (i == 0      && sb.nx_lo_neumann)
-                    ? NEUMANN_MIRROR(u[idx + 1], gfs->dx, sb.q_x_lo,
-                                     x_face_lo, y, z, FACE_LOWER_X)
-                    : u[idx - 1];
-                const double u_xp = (i == nx - 1 && sb.nx_hi_neumann)
-                    ? NEUMANN_MIRROR(u[idx - 1], gfs->dx, sb.q_x_hi,
-                                     x_face_hi, y, z, FACE_UPPER_X)
-                    : u[idx + 1];
-                const double u_ym = (j_at_lo     && sb.ny_lo_neumann)
-                    ? NEUMANN_MIRROR(u[idx + stride_y], gfs->dy, sb.q_y_lo,
-                                     x, y_face_lo, z, FACE_LOWER_Y)
-                    : u[idx - stride_y];
-                const double u_yp = (j_at_hi     && sb.ny_hi_neumann)
-                    ? NEUMANN_MIRROR(u[idx - stride_y], gfs->dy, sb.q_y_hi,
-                                     x, y_face_hi, z, FACE_UPPER_Y)
-                    : u[idx + stride_y];
-                const double u_zm = (k_at_lo     && sb.nz_lo_neumann)
-                    ? NEUMANN_MIRROR(u[idx + stride_z], gfs->dz, sb.q_z_lo,
-                                     x, y, z_face_lo, FACE_LOWER_Z)
-                    : u[idx - stride_z];
-                const double u_zp = (k_at_hi     && sb.nz_hi_neumann)
-                    ? NEUMANN_MIRROR(u[idx - stride_z], gfs->dz, sb.q_z_hi,
-                                     x, y, z_face_hi, FACE_UPPER_Z)
-                    : u[idx + stride_z];
+                const bool x_sp = (i == 1 && x_lower_d_v) || (i == nx - 2 && x_upper_d_v);
+                const bool y_sp = (j == 1 && y_lower_d_v) || (j == ny - 2 && y_upper_d_v);
+                const bool z_sp = (k == 1 && z_lower_d_v) || (k == nz - 2 && z_upper_d_v);
 
-                const double Lu =
-                      (u_xp + u_xm - 2.0 * u[idx]) * idx2
-                    + (u_yp + u_ym - 2.0 * u[idx]) * idy2
-                    + (u_zp + u_zm - 2.0 * u[idx]) * idz2;
+                /* Per-axis Laplacian contribution.  Standard
+                 * (u_- + u_+ - 2 u_self) for uniform spacing; FV
+                 * non-uniform (2 u_v - 3 u_self + u_far) at the cell
+                 * adjacent to a hybrid Dirichlet vertex.  See
+                 * gauss_seidel_3d for the derivation. */
+                double Lx_raw, Ly_raw, Lz_raw;
+                if (x_sp) {
+                    Lx_raw = (i == 1)
+                        ? 2.0 * u_xm - 3.0 * u_self + u_xp
+                        : 2.0 * u_xp - 3.0 * u_self + u_xm;
+                } else {
+                    Lx_raw = u_xm + u_xp - 2.0 * u_self;
+                }
+                if (y_sp) {
+                    Ly_raw = (j == 1)
+                        ? 2.0 * u_ym - 3.0 * u_self + u_yp
+                        : 2.0 * u_yp - 3.0 * u_self + u_ym;
+                } else {
+                    Ly_raw = u_ym + u_yp - 2.0 * u_self;
+                }
+                if (z_sp) {
+                    Lz_raw = (k == 1)
+                        ? 2.0 * u_zm - 3.0 * u_self + u_zp
+                        : 2.0 * u_zp - 3.0 * u_self + u_zm;
+                } else {
+                    Lz_raw = u_zm + u_zp - 2.0 * u_self;
+                }
+
+                const double Lu = Lx_raw * idx2 + Ly_raw * idy2 + Lz_raw * idz2;
                 def[idx] = Lu - rhs[idx];
                 const double absval = fabs(def[idx]);
                 if (absval > local_max)
@@ -805,8 +741,6 @@ double calc_defect_3d(struct ngfs_3d *gfs)
             }
         }
     }
-
-    #undef NEUMANN_MIRROR
 
     apply_bc_3d(gfs, VAR_DEF);
 

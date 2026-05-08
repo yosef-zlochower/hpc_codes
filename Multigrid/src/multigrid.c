@@ -173,14 +173,18 @@ int ngfs_3d_create_child(struct ngfs_3d *parent, int min_cells_per_direction)
 
     /* setup_3d_domain wants the *user-supplied* lower bound a_a, not
      * the shifted grid origin.  parent->domain.global_x0 holds the
-     * shifted origin (a_x - h_x/2 on cell-centred axes); reverse the
-     * shift before passing it to the child. */
+     * shifted origin (= a_x - h_x/2) on every axis with at least one
+     * Neumann face -- whether N-N, D-N, or N-D.  Reverse that shift
+     * before passing the bound to the child. */
+    const bool x_shifted = parent->domain.neumann_lower_x || parent->domain.neumann_upper_x;
+    const bool y_shifted = parent->domain.neumann_lower_y || parent->domain.neumann_upper_y;
+    const bool z_shifted = parent->domain.neumann_lower_z || parent->domain.neumann_upper_z;
     const double a_x = parent->domain.global_x0
-        + (parent->domain.neumann_lower_x ? parent->domain.dx * 0.5 : 0.0);
+        + (x_shifted ? parent->domain.dx * 0.5 : 0.0);
     const double a_y = parent->domain.global_y0
-        + (parent->domain.neumann_lower_y ? parent->domain.dy * 0.5 : 0.0);
+        + (y_shifted ? parent->domain.dy * 0.5 : 0.0);
     const double a_z = parent->domain.global_z0
-        + (parent->domain.neumann_lower_z ? parent->domain.dz * 0.5 : 0.0);
+        + (z_shifted ? parent->domain.dz * 0.5 : 0.0);
 
     struct ngfs_3d *child = calloc(1, sizeof(struct ngfs_3d));
     if (!child)
@@ -881,15 +885,23 @@ static void vcycle_debug(int rank, int level, const char *fmt, ...)
 *     double, L-infinity norm of the defect at this level after all
 *     smoothing steps
 *******************************************************************/
-/* True iff every axis of this hierarchy level is cell-centred (both
- * ends Neumann).  All levels of a CellCentred-Phase-2 hierarchy
- * inherit the same per-axis layout flags from the root, so this
- * answer is uniform across the V-cycle once the problem is fixed. */
+/* True iff this hierarchy level uses the cell-centred layout on
+ * every axis -- which under CellCentred Phase 3 is "every axis has
+ * at least one Neumann face".  Pure all-Dirichlet problems still use
+ * the legacy vertex-coincident transfer operators; everything else
+ * (NN-NN, D-N, N-D) goes through the cell-centred operators.
+ *
+ * The cc operators are not aware of the half-step at hybrid Dirichlet
+ * vertices, so the prolongation weights are slightly off at boundary
+ * cells.  This degrades the V-cycle convergence *rate* but not the
+ * final solution accuracy (the smoother fully resolves the discrete
+ * system). */
 static inline bool all_axes_cc(const struct ngfs_3d *gfs)
 {
-    return gfs->domain.neumann_lower_x && gfs->domain.neumann_upper_x
-        && gfs->domain.neumann_lower_y && gfs->domain.neumann_upper_y
-        && gfs->domain.neumann_lower_z && gfs->domain.neumann_upper_z;
+    const bool x = gfs->domain.neumann_lower_x || gfs->domain.neumann_upper_x;
+    const bool y = gfs->domain.neumann_lower_y || gfs->domain.neumann_upper_y;
+    const bool z = gfs->domain.neumann_lower_z || gfs->domain.neumann_upper_z;
+    return x && y && z;
 }
 
 double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
