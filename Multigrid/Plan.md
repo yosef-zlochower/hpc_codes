@@ -84,19 +84,116 @@ Severity-ordered.  Tags: **doc**, **decision**, **robustness**,
   per V-cycle while still converging the defect to $\le 10^{-8}$
   on every active preset.
 
-## Suggested order of attack
+## Phase 6 outcome (partial)
 
-1. **Boundary-stencil-with-compatibility fix (the unfinished
-   half of Phase 5).**  Find or design a boundary stencil that has
-   $\mathcal{O}(h^2)$ Laplacian truncation *and* preserves discrete
-   compatibility ($\sum f = \sum q/h$) so the V-cycle's
-   constant-mode residual vanishes for inhomogeneous Neumann
-   problems.  Re-enables `manufactured_neumann_inhomog` and
-   `manufactured_mixed_inhomog` in CTest.
-2. **cc prolongation geometry at hybrid boundary cells.**  At the
-   fine cell adjacent to a coarse Dirichlet vertex, the trilinear
-   weights $(3/4)$ + $(1/4)$ are off because the coarse "vertex"
-   isn't a coarse cell centre.  Replace with weights that respect
-   the actual vertex geometry $(1/2, 1/2)$ for the hybrid case.
-3. Optional: replace per-rank JSON with a single HDF5 or MPI-IO file
-   (mentioned as the "Fix (larger, optional)" under the original §5.1).
+Phase 6 was meant to land two coupled fixes that together would
+re-enable `manufactured_neumann_inhomog` and
+`manufactured_mixed_inhomog` in CTest.  In practice only the
+prolongation fix landed cleanly; the boundary-stencil fix made
+SOR with $\omega = 1.5$ unstable on Neumann faces (the
+4-point ghost has a negative off-diagonal $-1/23$ on $u_3$,
+breaking the M-matrix property the SOR convergence theorem
+relies on) and was reverted.  The deferred tests remain deferred.
+
+### 6.1 Position-aware cc prolongation (landed)
+
+`prolong_var_cc_3d` now branches per-axis on whether the fine
+cell is adjacent to a hybrid Dirichlet vertex (using the same
+`x_lower_d_v` / `x_upper_d_v` predicates that
+`gauss_seidel_3d` uses).  When the predicate fires, the 1D
+weights for that axis become $(1/2, 1/2)$ instead of $(3/4, 1/4)$,
+correcting the geometric error: at the fine cell adjacent to a
+coarse Dirichlet vertex, the fine cell is equidistant from the
+coarse vertex (at the box edge) and the coarse cell 1 (at
+$h_c/2$ inside the box), so the linear weights should be equal,
+not the $(3/4, 1/4)$ that the cc-trilinear formula assumes.
+
+**Effect.**  No change in the converged discrete solution
+(verified bit-for-bit on `manufactured_mixed_inhomog`), so the
+deferred presets do not become eligible for re-enabling on this
+change alone.  Big change in V-cycle convergence *rate*: the
+previously-slightly-wrong prolongation forced 30+ V-cycles to
+drive the boundary error down; the corrected version converges
+in well under 20.  `tol = 1.0e-12` early-exit in
+`run_test_convergence.sh` makes the convergence test 10x faster
+end-to-end (75 s vs 760 s for the full ctest convergence pass).
+
+### 6.2 Hybrid Dirichlet-vertex 4-point Lagrange (landed)
+
+`gauss_seidel_3d`'s slow path at cells adjacent to a hybrid
+Dirichlet vertex now uses the 4-point Lagrange-extrapolation
+form
+$$u_{xx} \approx \frac{1}{5 h^2}\bigl(16 u_v - 25 u_i + 10 u_{\text{far}} - u_{\text{far,far}}\bigr).$$
+This is $\mathcal{O}(h^2)$ truncation locally vs. $\mathcal{O}(h)$
+for the 3-point form.  No q-coefficient, so no compatibility
+issue.  `calc_defect_3d` matches.
+
+**Effect.**  No change in the converged discrete L_$\infty$
+error on `manufactured_mixed_inhomog` (the L_$\infty$ in that
+problem turns out to be at the upper-N ghost row, where the
+Neumann mirror's $\mathcal{O}(h^3)$ ghost truncation dominates --
+so improving the lower-D-vertex stencil doesn't move the needle).
+Kept in the code anyway because it improves the boundary-cell
+discretisation order in principle and the per-cell cost is
+negligible.
+
+### 6.2B 4-point Neumann ghost (attempted, reverted)
+
+Tried the higher-order Neumann ghost
+$u_{\text{ghost}} = (21/23) u_1 + (3/23) u_2 - (1/23) u_3 + (24/23) h\,q$
+in `apply_bc_3d`.  At $\omega = 1.0$ this restores rate $\sim 1.86$
+on `manufactured_neumann_inhomog` (up from $1.65$ at the
+finest pair).  At $\omega = 1.5$ (the current convergence-test
+setting) the iteration **diverges** at $N = 128$ because the
+$-1/23$ off-diagonal coefficient on $u_3$ makes the system
+matrix non-M, and the SOR convergence theorem breaks.
+
+The plan's proposed compensating $f$-shift restores
+$1^\top b = 0$ but doesn't fix the M-matrix violation, so
+$\omega = 1.5$ would still diverge.  The cleanest path to closing
+the deferred tests therefore needs **either** a different
+boundary stencil whose off-diagonals are non-negative, **or** a
+relaxation method that doesn't require an M-matrix (e.g.,
+Krylov-accelerated GS, or unpreconditioned Krylov on top of the
+V-cycle).
+
+The 4-point Neumann ghost code was reverted on every face;
+`apply_bc_3d` is back to $u_{\text{ghost}} = u_{\text{int}} + h q$
+on every Neumann boundary.
+
+## Outstanding work
+
+### Deferred tests
+
+* **`manufactured_neumann_inhomog`** and
+  **`manufactured_mixed_inhomog`** remain excluded from
+  `CONVERGENCE_PRESETS`.  Closing them needs either:
+
+  1. A higher-order Neumann ghost stencil whose off-diagonals
+     are non-negative (so the resulting matrix is still an M-matrix
+     and SOR with $\omega > 1$ converges).  Candidate: derive the
+     coefficients with a constraint optimisation that imposes
+     $a, b, c \ge 0$ and $d = 1$ (no compatibility issue), or
+     a 5-point form with one extra interior cell that gives more
+     freedom.
+
+  2. **Or** swap SOR for a relaxation that doesn't require an
+     M-matrix: damped Jacobi, Krylov-accelerated GS, or a Krylov
+     outer iteration with the V-cycle as preconditioner.  The
+     existing two-pass post-smooth (`omega` then `omega = 1.0`)
+     hints that this is already partly the workflow; full Krylov
+     wrapping would let us land the higher-order Neumann ghost
+     without giving up the SOR speedup on Dirichlet problems.
+
+* The 4-point Lagrange stencil at hybrid Dirichlet vertices is
+  in the kernel but has no measurable effect on `mixed_inhomog`
+  because that test's L_$\infty$ is dominated by the Neumann
+  ghost row.  Closing `mixed_inhomog` needs both the
+  hybrid-vertex stencil (already landed) and the higher-order
+  Neumann ghost.
+
+### Other deferred work
+
+* **Replace per-rank JSON with a single HDF5 or MPI-IO file**
+  (mentioned as the "Fix (larger, optional)" under the original
+  §5.1).  Independent of the boundary-stencil work.

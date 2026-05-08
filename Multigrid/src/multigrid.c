@@ -768,18 +768,55 @@ void prolong_var_cc_3d(struct ngfs_3d *child, int cvar,
     const int64_t pp_lo_z = (parent->domain.lower_z_rank != INVALID_RANK) ? gs : 1;
     const int64_t pp_hi_z = parent->nz - ((parent->domain.upper_z_rank != INVALID_RANK) ? gs : 1);
 
+    /* Phase 6.1 position-aware weights: at the fine cell adjacent to
+     * a hybrid Dirichlet vertex the coarse "vertex" sits at the box
+     * boundary, not at -h_c/2 from the first coarse cell centre.
+     * The geometrically correct linear interpolation weights for
+     * that axis are (1/2, 1/2) instead of the standard (3/4, 1/4).
+     * The flag set is the same one gauss_seidel_3d uses for the
+     * non-uniform smoother stencil at the same cells. */
+    const bool x_lower_d_v = (parent->domain.lower_x_rank == INVALID_RANK)
+                          && !parent->domain.neumann_lower_x
+                          &&  parent->domain.neumann_upper_x;
+    const bool x_upper_d_v = (parent->domain.upper_x_rank == INVALID_RANK)
+                          &&  parent->domain.neumann_lower_x
+                          && !parent->domain.neumann_upper_x;
+    const bool y_lower_d_v = (parent->domain.lower_y_rank == INVALID_RANK)
+                          && !parent->domain.neumann_lower_y
+                          &&  parent->domain.neumann_upper_y;
+    const bool y_upper_d_v = (parent->domain.upper_y_rank == INVALID_RANK)
+                          &&  parent->domain.neumann_lower_y
+                          && !parent->domain.neumann_upper_y;
+    const bool z_lower_d_v = (parent->domain.lower_z_rank == INVALID_RANK)
+                          && !parent->domain.neumann_lower_z
+                          &&  parent->domain.neumann_upper_z;
+    const bool z_upper_d_v = (parent->domain.upper_z_rank == INVALID_RANK)
+                          &&  parent->domain.neumann_lower_z
+                          && !parent->domain.neumann_upper_z;
+
+    /* Global cell counts -- used to detect "fine cell adjacent to
+     * an upper Dirichlet vertex" via gp_a == global_n*_cells. */
+    const int64_t Nx_cells = parent->domain.global_nx_cells;
+    const int64_t Ny_cells = parent->domain.global_ny_cells;
+    const int64_t Nz_cells = parent->domain.global_nz_cells;
+
     /* For every fine cell at parent-global index gp, the enclosing
      * coarse cell is gc = (gp + 1) / 2; the fine cell sits at
      * coarse-relative offset -h/2 (lower half, gp odd) or +h/2
-     * (upper half, gp even).  Trilinear weights: 3/4 toward the
-     * enclosing coarse cell, 1/4 toward the neighbour on the same
-     * side as the fine cell within the coarse cell. */
+     * (upper half, gp even).  Default trilinear weights: 3/4 toward
+     * the enclosing coarse cell, 1/4 toward the neighbour on the same
+     * side as the fine cell within the coarse cell.  Position-aware
+     * (1/2, 1/2) override at hybrid Dirichlet vertices, see above. */
     for (int64_t kp = pp_lo_z; kp < pp_hi_z; kp++)
     {
         const int64_t gp_z = parent->domain.local_k0 + kp;
         const int64_t gc_z = (gp_z + 1) / 2;
         const int64_t kc   = gc_z - child->domain.local_k0;
         const int     dkn  = (gp_z & 1) ? -1 : +1;   /* odd: lower half */
+        const bool z_at_d_v = (gp_z == 1 && z_lower_d_v)
+                           || (gp_z == Nz_cells && z_upper_d_v);
+        const double wz_n = z_at_d_v ? 0.5 : 0.75;
+        const double wz_f = z_at_d_v ? 0.5 : 0.25;
 
         for (int64_t jp = pp_lo_y; jp < pp_hi_y; jp++)
         {
@@ -787,6 +824,10 @@ void prolong_var_cc_3d(struct ngfs_3d *child, int cvar,
             const int64_t gc_y = (gp_y + 1) / 2;
             const int64_t jc   = gc_y - child->domain.local_j0;
             const int     djn  = (gp_y & 1) ? -1 : +1;
+            const bool y_at_d_v = (gp_y == 1 && y_lower_d_v)
+                               || (gp_y == Ny_cells && y_upper_d_v);
+            const double wy_n = y_at_d_v ? 0.5 : 0.75;
+            const double wy_f = y_at_d_v ? 0.5 : 0.25;
 
             for (int64_t ip = pp_lo_x; ip < pp_hi_x; ip++)
             {
@@ -794,18 +835,26 @@ void prolong_var_cc_3d(struct ngfs_3d *child, int cvar,
                 const int64_t gc_x = (gp_x + 1) / 2;
                 const int64_t ic   = gc_x - child->domain.local_i0;
                 const int     din  = (gp_x & 1) ? -1 : +1;
+                const bool x_at_d_v = (gp_x == 1 && x_lower_d_v)
+                                   || (gp_x == Nx_cells && x_upper_d_v);
+                const double wx_n = x_at_d_v ? 0.5 : 0.75;
+                const double wx_f = x_at_d_v ? 0.5 : 0.25;
 
 #define CCC(di, dj, dk) cval[(ic+(di)) + ((jc+(dj)) + (kc+(dk)) * cny) * cnx]
-                /* Trilinear sum: weights are products of (3/4) for
-                 * the enclosing coarse cell and (1/4) for the
-                 * same-side neighbour, on each axis. */
+                /* Tensor-product trilinear sum with per-axis (near, far)
+                 * weights.  When all three axes use the standard
+                 * (0.75, 0.25), the eight terms reduce to the
+                 * 27/64..1/64 formula.  At a hybrid Dirichlet vertex
+                 * one or more axes use (0.5, 0.5) instead. */
                 const double update =
-                      (27.0 / 64.0) *  CCC( 0,   0,   0)
-                    + ( 9.0 / 64.0) * (CCC(din,  0,   0) + CCC( 0,  djn,  0)
-                                     + CCC( 0,   0,  dkn))
-                    + ( 3.0 / 64.0) * (CCC(din, djn,  0) + CCC(din,  0,  dkn)
-                                     + CCC( 0,  djn, dkn))
-                    + ( 1.0 / 64.0) *  CCC(din, djn, dkn);
+                      wx_n * wy_n * wz_n * CCC( 0,   0,   0)
+                    + wx_f * wy_n * wz_n * CCC(din, 0,   0)
+                    + wx_n * wy_f * wz_n * CCC( 0,  djn, 0)
+                    + wx_n * wy_n * wz_f * CCC( 0,   0,  dkn)
+                    + wx_f * wy_f * wz_n * CCC(din, djn, 0)
+                    + wx_f * wy_n * wz_f * CCC(din, 0,  dkn)
+                    + wx_n * wy_f * wz_f * CCC( 0,  djn, dkn)
+                    + wx_f * wy_f * wz_f * CCC(din, djn, dkn);
 #undef CCC
 
                 pval[ip + (jp + kp * pny) * pnx] -= update;

@@ -146,12 +146,10 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         else
         {
             /* Cell-centred Neumann ghost: write u[0] = u[1] + h*q.
-             * Boundary plane at gfs->x0 + h/2 = a.  q is the outward
-             * normal derivative; lower-x outward normal is -x_hat, so
-             * (u[1]-u[0])/h = -q -> u[0] = u[1] + h*q.  The 4-point
-             * higher-order alternative was attempted in Phase 5 but
-             * produced a discrete compatibility mismatch by factor
-             * 24/23 -- see CellCentred_plan.md sec. 6 for the analysis. */
+             * Phase 6.2B attempted the 4-point higher-order
+             * extrapolation here but it makes the matrix non-M
+             * (negative off-diagonal -1/23 on u_3) and SOR with
+             * omega=1.5 diverges on it; reverted. */
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  x_bdy = gfs->x0 + 0.5 * gfs->dx;
             for (int k = 0; k < nz; k++) {
@@ -197,7 +195,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         }
         else
         {
-            /* Cell-centred Neumann ghost: write u[nx-1] = u[nx-2] + h*q. */
+            /* Cell-centred Neumann ghost: u[nx-1] = u[nx-2] + h*q. */
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  x_bdy = gfs->x0 + (nx - 1) * gfs->dx - 0.5 * gfs->dx;
             for (int k = 0; k < nz; k++) {
@@ -493,30 +491,48 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
                 u_new_ = cx * (u_xp_ + u_xm_) + cy * (u_yp_ + u_ym_)                       \
                        + cz * (u_zp_ + u_zm_) - cs * rhs[(idx_)];                          \
             } else {                                                                        \
-                /* Finite-volume non-uniform stencil at the cell adjacent \
-                 * to a hybrid Dirichlet vertex.  Cell-averaged Laplacian \
-                 * (1/h) * (u'(right_face) - u'(left_face)) with: \
-                 *   right face (interior): centred (u_far - u_self)/h \
-                 *   left  face (vertex):  one-sided (u_self - u_v)/(h/2) = 2(u_self-u_v)/h \
-                 * gives  (2 u_v - 3 u_self + u_far)/h^2.  Diagonal coeff \
-                 * is -3 (vs. -2 for uniform); off-diagonal is 2*u_v + u_far. */ \
+                /* Phase 6.2 4-point Lagrange stencil at the cell adjacent \
+                 * to a hybrid Dirichlet vertex.  Cubic Lagrange-extrapolate \
+                 * a virtual ghost u(-h/2) through the four points (u_v, \
+                 * u_self, u_far, u_far_far), then plug into the standard \
+                 * centred Laplacian.  Result (lower D side, i=1): \
+                 *   u_xx ~= (1/(5 h^2))(16 u_v - 25 u_self + 10 u_far - u_far_far). \
+                 * O(h^2) Laplacian truncation -> rate 2 globally (vs. the \
+                 * O(h) of the Phase 3 3-point form).  No q-coefficient, so \
+                 * the discrete compatibility is unaffected (the Phase 5 \
+                 * concern was specific to the Neumann ghost variant). */    \
                 double diag_x_ = 2.0, off_x_ = u_xm_ + u_xp_;                              \
                 if (x_sp_) {                                                                \
-                    diag_x_ = 3.0;                                                          \
-                    if ((i_) == 1) off_x_ = 2.0 * u_xm_ + u_xp_;                            \
-                    else           off_x_ = 2.0 * u_xp_ + u_xm_;                            \
+                    diag_x_ = 5.0;                                                          \
+                    if ((i_) == 1) {                                                        \
+                        const double u_ff_ = u[(idx_) + 2];                                \
+                        off_x_ = (16.0/5.0) * u_xm_ + 2.0 * u_xp_ - (1.0/5.0) * u_ff_;       \
+                    } else {                                                                \
+                        const double u_ff_ = u[(idx_) - 2];                                \
+                        off_x_ = (16.0/5.0) * u_xp_ + 2.0 * u_xm_ - (1.0/5.0) * u_ff_;       \
+                    }                                                                       \
                 }                                                                           \
                 double diag_y_ = 2.0, off_y_ = u_ym_ + u_yp_;                              \
                 if (y_sp_) {                                                                \
-                    diag_y_ = 3.0;                                                          \
-                    if ((j_) == 1) off_y_ = 2.0 * u_ym_ + u_yp_;                            \
-                    else           off_y_ = 2.0 * u_yp_ + u_ym_;                            \
+                    diag_y_ = 5.0;                                                          \
+                    if ((j_) == 1) {                                                        \
+                        const double u_ff_ = u[(idx_) + 2 * stride_y];                      \
+                        off_y_ = (16.0/5.0) * u_ym_ + 2.0 * u_yp_ - (1.0/5.0) * u_ff_;       \
+                    } else {                                                                \
+                        const double u_ff_ = u[(idx_) - 2 * stride_y];                      \
+                        off_y_ = (16.0/5.0) * u_yp_ + 2.0 * u_ym_ - (1.0/5.0) * u_ff_;       \
+                    }                                                                       \
                 }                                                                           \
                 double diag_z_ = 2.0, off_z_ = u_zm_ + u_zp_;                              \
                 if (z_sp_) {                                                                \
-                    diag_z_ = 3.0;                                                          \
-                    if ((k_) == 1) off_z_ = 2.0 * u_zm_ + u_zp_;                            \
-                    else           off_z_ = 2.0 * u_zp_ + u_zm_;                            \
+                    diag_z_ = 5.0;                                                          \
+                    if ((k_) == 1) {                                                        \
+                        const double u_ff_ = u[(idx_) + 2 * stride_z];                      \
+                        off_z_ = (16.0/5.0) * u_zm_ + 2.0 * u_zp_ - (1.0/5.0) * u_ff_;       \
+                    } else {                                                                \
+                        const double u_ff_ = u[(idx_) - 2 * stride_z];                      \
+                        off_z_ = (16.0/5.0) * u_zp_ + 2.0 * u_zm_ - (1.0/5.0) * u_ff_;       \
+                    }                                                                       \
                 }                                                                           \
                 const double diag_ = diag_x_ * inv_dx2 + diag_y_ * inv_dy2 + diag_z_ * inv_dz2; \
                 const double off_  = off_x_  * inv_dx2 + off_y_  * inv_dy2 + off_z_  * inv_dz2; \
@@ -649,29 +665,42 @@ double calc_defect_3d(struct ngfs_3d *gfs)
                 const bool z_sp = (k == 1 && z_lower_d_v) || (k == nz - 2 && z_upper_d_v);
 
                 /* Per-axis Laplacian contribution.  Standard
-                 * (u_- + u_+ - 2 u_self) for uniform spacing; FV
-                 * non-uniform (2 u_v - 3 u_self + u_far) at the cell
-                 * adjacent to a hybrid Dirichlet vertex.  See
-                 * gauss_seidel_3d for the derivation. */
+                 * (u_- + u_+ - 2 u_self) for uniform spacing; the
+                 * 4-point Lagrange extrapolation
+                 * (1/5)(16 u_v - 25 u_self + 10 u_far - u_far_far) at
+                 * the cell adjacent to a hybrid Dirichlet vertex.
+                 * See gauss_seidel_3d for the derivation. */
                 double Lx_raw, Ly_raw, Lz_raw;
                 if (x_sp) {
-                    Lx_raw = (i == 1)
-                        ? 2.0 * u_xm - 3.0 * u_self + u_xp
-                        : 2.0 * u_xp - 3.0 * u_self + u_xm;
+                    if (i == 1) {
+                        const double u_ff = u[idx + 2];
+                        Lx_raw = (16.0 * u_xm - 25.0 * u_self + 10.0 * u_xp - u_ff) / 5.0;
+                    } else {
+                        const double u_ff = u[idx - 2];
+                        Lx_raw = (16.0 * u_xp - 25.0 * u_self + 10.0 * u_xm - u_ff) / 5.0;
+                    }
                 } else {
                     Lx_raw = u_xm + u_xp - 2.0 * u_self;
                 }
                 if (y_sp) {
-                    Ly_raw = (j == 1)
-                        ? 2.0 * u_ym - 3.0 * u_self + u_yp
-                        : 2.0 * u_yp - 3.0 * u_self + u_ym;
+                    if (j == 1) {
+                        const double u_ff = u[idx + 2 * stride_y];
+                        Ly_raw = (16.0 * u_ym - 25.0 * u_self + 10.0 * u_yp - u_ff) / 5.0;
+                    } else {
+                        const double u_ff = u[idx - 2 * stride_y];
+                        Ly_raw = (16.0 * u_yp - 25.0 * u_self + 10.0 * u_ym - u_ff) / 5.0;
+                    }
                 } else {
                     Ly_raw = u_ym + u_yp - 2.0 * u_self;
                 }
                 if (z_sp) {
-                    Lz_raw = (k == 1)
-                        ? 2.0 * u_zm - 3.0 * u_self + u_zp
-                        : 2.0 * u_zp - 3.0 * u_self + u_zm;
+                    if (k == 1) {
+                        const double u_ff = u[idx + 2 * stride_z];
+                        Lz_raw = (16.0 * u_zm - 25.0 * u_self + 10.0 * u_zp - u_ff) / 5.0;
+                    } else {
+                        const double u_ff = u[idx - 2 * stride_z];
+                        Lz_raw = (16.0 * u_zp - 25.0 * u_self + 10.0 * u_zm - u_ff) / 5.0;
+                    }
                 } else {
                     Lz_raw = u_zm + u_zp - 2.0 * u_self;
                 }
