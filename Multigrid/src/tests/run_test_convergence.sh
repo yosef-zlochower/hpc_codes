@@ -63,9 +63,9 @@ nz_cells = $n
 
 [solver]
 multigrid = true
-omega     = 1.0
-n_smooth  = 50
-n_iters   = 60
+omega     = 1.5
+n_smooth  = 2
+n_iters   = 40
 tol       = 1.0e-12
 subcycles = 1
 min_cells = 4

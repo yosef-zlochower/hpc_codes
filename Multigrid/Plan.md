@@ -34,7 +34,7 @@ items above were tackled.
 Severity-ordered.  Tags: **doc**, **decision**, **robustness**,
 **ergonomics**, **extension**.
 
-### Known limitations after CellCentred Phases 2--4
+### Known limitations after CellCentred Phases 2--5
 
 * **Boundary-cell stencil order at hybrid Dirichlet vertices.**  Two
   presets are registered in `problem_registry.c` but **excluded**
@@ -45,45 +45,58 @@ Severity-ordered.  Tags: **doc**, **decision**, **robustness**,
   cell-centred boundary stencil
   $u_{\text{ghost}} = u_{\text{int}} + h\,q$ (Neumann mirror) or the
   3-point non-uniform formula
-  $(4/(3 h^2))(2 u_v - 3 u + u_{\text{far}})$ (hybrid Dirichlet
-  vertex) has only $\mathcal{O}(h)$ local truncation when the exact
-  solution has a non-zero higher derivative at the boundary.  This
-  propagates to global rate $\sim 1.5$ at $h = 1/128$, just below
-  the verifier's $[1.8, 2.3]$ band.  Companion presets where the
-  relevant derivatives vanish by symmetry (e.g.
-  `manufactured_neumann_homog` with $u' = u''' = 0$ on the boundary)
-  give a clean rate 2 and remain in CTest.  The fix --- a 4-point
-  one-sided ghost-cell formula $\mathcal{O}(h^4)$ accurate, see
-  `CellCentred_plan.md` §4.2 --- is scheduled for Phase 5.
+  $(2 u_v - 3 u + u_{\text{far}})/h^2$ (hybrid Dirichlet vertex) has
+  only $\mathcal{O}(h)$ local truncation when the exact solution has
+  non-zero higher derivatives at the boundary.  This propagates to
+  global rate $\sim 1.5$ on the inhomogeneous presets.
 
-* **Sub-optimal SOR on Neumann boundaries (carry-over).**  With
-  $\omega = 1.5$ the V-cycle rate is $\sim 0.001$ for Dirichlet-only
-  problems but degrades to $\sim 0.6$ at $h = 1/128$ for Neumann or
-  mixed BC.  With $\omega = 1.0$ the rate stabilises at $\sim 0.34$.
-  The convergence tests use $\omega = 1.0$ and $n_{\text{iters}} = 60$
-  to guarantee convergence within tolerance.  Phase 5 will revisit
-  this once the boundary-stencil upgrade lands; the original
-  hypothesis (red-black ordering interacts badly with the
-  in-stencil mirror) is now moot --- Phases 2/3 removed the
-  in-stencil mirror entirely, so the SOR problem must lie elsewhere
-  (likely the cc trilinear prolongation's slightly off geometry at
-  hybrid boundary cells, see `CellCentred_plan.md` §3.3).
+  Phase 5 attempted the 4-point higher-order extrapolation
+  $u_{\text{ghost}} = (21/23) u_1 + (3/23) u_2 - (1/23) u_3 + (24/23) h\,q$
+  (and the analogous 4-point Lagrange form at hybrid Dirichlet
+  vertices).  Both formulas give $\mathcal{O}(h^2)$ Laplacian
+  truncation locally and *should* restore rate 2, but in practice
+  they did not improve convergence: the 4-point Neumann ghost has
+  d-coefficient $24/23$ in front of $h q$, which means the discrete
+  compatibility becomes $\sum f = (24/23) \sum q/h$ instead of
+  matching the continuous $\sum f = \sum q/h$.  The 4.3% mismatch
+  shows up as a constant-mode imbalance of size $\mathcal{O}(\sum
+  q/h)/N^3$ that the V-cycle cannot drive to zero.  The 4-point
+  Lagrange formula at hybrid D vertices gave bit-identical
+  solutions to the 3-point form (likely because the cc trilinear
+  prolongation's geometric error at hybrid boundary cells dominates
+  the V-cycle behaviour, masking the smoother improvement).  The
+  Phase 5 4-point boundary code was reverted; the simpler (and
+  empirically slightly better) Phase 3/4 formulas are back.
+
+  A genuine fix likely requires (a) a boundary stencil whose
+  d-coefficient stays at exactly 1 to preserve compatibility, and
+  (b) a cc prolongation that uses correct geometric weights at
+  hybrid boundary cells.  Both deferred.
+
+* **SOR retuning (Phase 5, landed).**  The convergence tests now
+  use $\omega = 1.5$, $n_{\text{smooth}} = 2$, $n_{\text{iters}} = 40$
+  (down from $\omega = 1.0$, $n_{\text{smooth}} = 50$,
+  $n_{\text{iters}} = 60$).  Phase 3's removal of the in-stencil
+  mirror means the smoother kernel is now the standard 7-point
+  Gauss-Seidel SOR everywhere, and SOR with $\omega = 1.5$ no
+  longer interacts badly with the boundary as it did under the
+  Phase-1 layout.  Net effect: ~40$\times$ fewer smoothing sweeps
+  per V-cycle while still converging the defect to $\le 10^{-8}$
+  on every active preset.
 
 ## Suggested order of attack
 
-1. **Phase 5: 4-point higher-order ghost.**  Replaces the simple
-   $u_{\text{ghost}} = u_{\text{int}} + h\,q$ formula in
-   `apply_bc_3d` (cell-centred Neumann faces) and the 3-point
-   non-uniform formula in `gauss_seidel_3d` / `calc_defect_3d`
-   (cells adjacent to a hybrid Dirichlet vertex) with the
-   $\mathcal{O}(h^4)$ one-sided extrapolation
-   $u_{\text{ghost}} = (21/23) u_1 + (3/23) u_2 - (1/23) u_3 + (24/23) h\,q$.
-   This restores rate 2 at the boundary cells and lets us re-enable
-   `manufactured_neumann_inhomog` and `manufactured_mixed_inhomog`
-   in CTest.
-2. **Phase 5 (continued): SOR retuning.**  Test whether $\omega = 1.5$
-   with the new boundary stencil recovers the rate-0.001 V-cycle on
-   Neumann/mixed problems; if so, drop $n_{\text{iters}}$ from 60
-   back to 20 in the convergence-test TOML.
+1. **Boundary-stencil-with-compatibility fix (the unfinished
+   half of Phase 5).**  Find or design a boundary stencil that has
+   $\mathcal{O}(h^2)$ Laplacian truncation *and* preserves discrete
+   compatibility ($\sum f = \sum q/h$) so the V-cycle's
+   constant-mode residual vanishes for inhomogeneous Neumann
+   problems.  Re-enables `manufactured_neumann_inhomog` and
+   `manufactured_mixed_inhomog` in CTest.
+2. **cc prolongation geometry at hybrid boundary cells.**  At the
+   fine cell adjacent to a coarse Dirichlet vertex, the trilinear
+   weights $(3/4)$ + $(1/4)$ are off because the coarse "vertex"
+   isn't a coarse cell centre.  Replace with weights that respect
+   the actual vertex geometry $(1/2, 1/2)$ for the hybrid case.
 3. Optional: replace per-rank JSON with a single HDF5 or MPI-IO file
    (mentioned as the "Fix (larger, optional)" under the original §5.1).

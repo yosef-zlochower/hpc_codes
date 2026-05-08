@@ -148,7 +148,10 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
             /* Cell-centred Neumann ghost: write u[0] = u[1] + h*q.
              * Boundary plane at gfs->x0 + h/2 = a.  q is the outward
              * normal derivative; lower-x outward normal is -x_hat, so
-             * (u[1]-u[0])/h = -q -> u[0] = u[1] + h*q. */
+             * (u[1]-u[0])/h = -q -> u[0] = u[1] + h*q.  The 4-point
+             * higher-order alternative was attempted in Phase 5 but
+             * produced a discrete compatibility mismatch by factor
+             * 24/23 -- see CellCentred_plan.md sec. 6 for the analysis. */
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  x_bdy = gfs->x0 + 0.5 * gfs->dx;
             for (int k = 0; k < nz; k++) {
@@ -194,9 +197,7 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
         }
         else
         {
-            /* Cell-centred Neumann ghost: write u[nx-1] = u[nx-2] + h*q.
-             * Upper-x outward normal is +x_hat, so (u[nx-1]-u[nx-2])/h
-             * = q -> u[nx-1] = u[nx-2] + h*q. */
+            /* Cell-centred Neumann ghost: write u[nx-1] = u[nx-2] + h*q. */
             const bc_fn_t cb = face_value(gfs, f, var);
             const double  x_bdy = gfs->x0 + (nx - 1) * gfs->dx - 0.5 * gfs->dx;
             for (int k = 0; k < nz; k++) {
