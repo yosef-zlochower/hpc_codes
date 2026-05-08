@@ -120,4 +120,48 @@ double problem_compute_max_error(struct ngfs_3d *gfs,
 *******************************************************************/
 void problem_project_mean_zero(struct ngfs_3d *gfs, int var);
 
+/******************************************************************
+* Purpose: Estimate the local truncation error tau_h(u_h) at every
+*     cell adjacent to a Neumann face owned by this rank, and write
+*     it into tau_buf.  Implements Phase 7's deferred-correction
+*     diagnostic: for the simple cell-centred Neumann mirror
+*     u_ghost = u_int + h*q, the boundary-cell Laplacian truncation
+*     against the exact solution is
+*         tau_h(boundary cell) = -(h_a / 24) * d^3 u / dn^3
+*     where d/dn is the outward-normal derivative.  Equivalently,
+*     in axis-x notation:
+*         tau_h |_lower-x = + (h_x / 24) u_xxx(boundary)
+*         tau_h |_upper-x = - (h_x / 24) u_xxx(boundary)
+*     and similarly for y, z.  d^3 u / dx^3 is approximated by a
+*     centred 4-point one-sided FD using the four interior cells
+*     nearest the boundary on the relevant axis: e.g. at i = 1 on
+*     a lower-x Neumann face,
+*         u_xxx ~= (u_4 - 3 u_3 + 3 u_2 - u_1) / h_x^3,
+*     which approximates u_xxx(h_x/2) to O(h).  The resulting tau
+*     estimate is then O(h^2) accurate in absolute value -- enough
+*     for one Pereyra defect-correction step to bump global rate 1
+*     -> rate 2 at the boundary.
+*
+*     Cells away from any Neumann face receive zero.  At a corner
+*     where multiple Neumann faces meet, contributions from each
+*     face accumulate additively (the per-axis contributions are
+*     independent normals).
+* Input Variables:
+*     gfs: struct ngfs_3d*, must have valid bc spec; the
+*         var_in slot must hold the iterate u_h
+*     var_in: int, index of u_h in gfs->vars[]
+*     tau_buf: double*, caller-allocated, size at least gfs->n;
+*         entirely overwritten
+* Output Variables:
+*     tau_buf: filled with the per-cell truncation estimate
+* Return Values and indicators of success / failure
+*     (none).  Requires at least 4 interior cells along each axis
+*     that has a Neumann face owned by this rank (the 4-point FD
+*     reads u_1..u_4 on the lower side and the four mirror cells
+*     on the upper side).  The hierarchy's min_cells = 4 default
+*     guarantees this on every level.
+*******************************************************************/
+void boundary_truncation_3d(struct ngfs_3d *gfs, int var_in,
+                            double *tau_buf);
+
 #endif /* PROBLEM_H */
