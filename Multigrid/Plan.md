@@ -161,38 +161,202 @@ The 4-point Neumann ghost code was reverted on every face;
 `apply_bc_3d` is back to $u_{\text{ghost}} = u_{\text{int}} + h q$
 on every Neumann boundary.
 
-## Outstanding work
+## Phase 7 plan: deferred correction for rate-2 Neumann boundaries
 
-### Deferred tests
+The two excluded CTest presets
+(`manufactured_neumann_inhomog`, `manufactured_mixed_inhomog`)
+both fail because the simple cell-centred Neumann mirror
+$u_{\text{ghost}} = u_{\text{int}} + h\,q$ has $\mathcal{O}(h^3)$
+ghost truncation, which becomes $\mathcal{O}(h)$ Laplacian
+truncation at the boundary cell when $u'''(\text{boundary})
+\neq 0$.  Phase 6.2B's 4-point higher-order ghost addresses the
+truncation order but breaks the M-matrix property and SOR
+diverges.  This plan keeps the M-matrix-preserving simple ghost
+and recovers rate-2 accuracy via a separate **defect-correction
+solve** stacked on top of the existing V-cycle.
 
-* **`manufactured_neumann_inhomog`** and
-  **`manufactured_mixed_inhomog`** remain excluded from
-  `CONVERGENCE_PRESETS`.  Closing them needs either:
+### 7.1 Why a stencil-only fix is impossible
 
-  1. A higher-order Neumann ghost stencil whose off-diagonals
-     are non-negative (so the resulting matrix is still an M-matrix
-     and SOR with $\omega > 1$ converges).  Candidate: derive the
-     coefficients with a constraint optimisation that imposes
-     $a, b, c \ge 0$ and $d = 1$ (no compatibility issue), or
-     a 5-point form with one extra interior cell that gives more
-     freedom.
+A higher-order ghost extrapolation
+$$u_{\text{ghost}} = a\,u_1 + b\,u_2 + c\,u_3 + d\,h\,q$$
+is, geometrically, polynomial extrapolation from the interior
+cells $u_1, u_2, u_3$ at $x = h/2, 3h/2, 5h/2$ to the ghost
+location $x = -h/2$, with a Neumann correction proportional to
+$q$.  The Lagrange basis values at $x = -h/2$ for points at
+$\{h/2, 3h/2, 5h/2, 7h/2\}$ are $(4, -6, 4, -1)$ -- alternating
+signs are inherent.  Solving for the coefficients with the
+constraint $d = 1$ (compatibility-preserving) and
+$\mathcal{O}(h^4)$ truncation gives 4-point coefficients
+$(a, b, c, e) = (25/24, -1/8, 1/8, -1/24)$ -- same alternating
+signs, regardless of stencil width.  No
+compatibility-preserving high-order ghost stencil has all
+non-negative coefficients; the matrix's boundary row will
+violate the M-matrix property.  The fix has to live somewhere
+other than the ghost coefficient set.
 
-  2. **Or** swap SOR for a relaxation that doesn't require an
-     M-matrix: damped Jacobi, Krylov-accelerated GS, or a Krylov
-     outer iteration with the V-cycle as preconditioner.  The
-     existing two-pass post-smooth (`omega` then `omega = 1.0`)
-     hints that this is already partly the workflow; full Krylov
-     wrapping would let us land the higher-order Neumann ghost
-     without giving up the SOR speedup on Dirichlet problems.
+### 7.2 Deferred correction
 
-* The 4-point Lagrange stencil at hybrid Dirichlet vertices is
-  in the kernel but has no measurable effect on `mixed_inhomog`
-  because that test's L_$\infty$ is dominated by the Neumann
-  ghost row.  Closing `mixed_inhomog` needs both the
-  hybrid-vertex stencil (already landed) and the higher-order
-  Neumann ghost.
+Solve the low-order system *twice*.  The first solve produces
+$u_h$ with rate-1 boundary truncation; the second solve corrects
+it.
 
-### Other deferred work
+**Mathematical setup.**  Let $A$ be the simple-ghost discrete
+Laplacian (M-matrix preserved), $u_h$ its converged solution,
+and $u^*$ the grid-restricted exact solution.  The local
+truncation error
+$$\tau_h \;=\; A\,u^* - f_h$$
+is $\mathcal{O}(h^2)$ at every interior cell and
+$\mathcal{O}(h)$ at cells adjacent to a Neumann face, where the
+leading boundary contribution is
+$$\tau_h(\text{boundary cell}) \;=\; \frac{h}{24}\,\partial_n^3
+u^*(\text{boundary}) \;+\; \mathcal{O}(h^2).$$
+
+The discrete error $e_h = u^* - u_h$ satisfies $A\,e_h = \tau_h$,
+so $e_h = A^{-1}\tau_h = \mathcal{O}(h)$ at boundary cells.  The
+deferred-correction step is: estimate $\tau_h$ from the
+low-order solution $u_h$, solve $A v = \hat{\tau}_h$ as a
+correction problem with homogeneous BCs, and report
+$$u_{\text{corrected}} \;=\; u_h + v.$$
+If $\hat{\tau}_h$ matches $\tau_h$ to $\mathcal{O}(h^2)$, then
+$u_{\text{corrected}} - u^* = \mathcal{O}(h^2)$ globally,
+including in $L_\infty$.  This is the standard Pereyra (1968)
+deferred-correction argument.
+
+**Estimating $\partial_n^3 u^*$.**  For a Neumann face on a
+cell-centred axis, a one-sided fourth-order finite difference
+using the four interior cells nearest the boundary plus the
+ghost row gives $\partial_n^3 u^*$ to $\mathcal{O}(h)$, which is
+enough to make the correction $(h/24)\,\hat{\tau}$ accurate to
+$\mathcal{O}(h^2)$.  For the lower-x face,
+$$\partial_x^3 u(\text{boundary}) \;\approx\;
+\frac{u_3 - 3 u_2 + 3 u_1 - u_{\text{ghost}}}{h^3}
+\;=\; \frac{u_3 - 3 u_2 + 4 u_1 - h\,q}{h^3},$$
+substituting $u_{\text{ghost}} = u_1 + h\,q$.  No extra
+dependencies, no special-casing the corner.
+
+### 7.3 Implementation sub-steps
+
+**Step 1.**  Add a helper
+`boundary_truncation_3d(struct ngfs_3d *gfs, double *tau_buf)`
+in `problem_helpers.c` that:
+* Zeros `tau_buf` over all cells.
+* For each face the rank owns and that is Neumann, computes
+  $\partial_n^3 u_h$ at every cell on the face's interior row
+  using the 4-point one-sided formula above, scales by $h/24$,
+  and writes that into the corresponding entry of `tau_buf`.
+* Handles the per-axis spacing $h_a$ (each face has its own
+  normal direction and own $h$).
+* At a corner cell where two Neumann faces meet, the two
+  $\partial_n^3$ contributions are along independent normals
+  and add directly.
+
+**Step 2.**  Modify `driver_multigrid.c`'s outer loop into two
+phases:
+
+* *Phase A* -- the current low-order V-cycle loop, unchanged.
+* *Phase B* -- a single defect-correction solve.  Compute
+  $\hat{\tau}_h$ from the converged $u_h$; set the correction
+  variable's RHS to $-\hat{\tau}_h$; flip the BC spec to its
+  homogeneous variant via `bc_spec_homogenize` (already exists
+  for the hierarchy constructor); run the V-cycle on the
+  correction system; fold the result into $u_h$ with
+  `u_h += v`.  For singular all-Neumann problems, mean-zero-
+  project $v$ before folding (otherwise the correction adds an
+  arbitrary constant to $u_h$).  No further iteration needed --
+  one pass of Phase B is enough to bump rate 1 → rate 2 for any
+  smooth solution.
+
+**Step 3.**  Update `CONVERGENCE_PRESETS` in
+`src/tests/CMakeLists.txt`: re-enable
+`manufactured_neumann_inhomog` and
+`manufactured_mixed_inhomog`.  Verify the rate is in
+$[1.8, 2.3]$ at the verifier's finest pair.
+
+**Step 4.**  Add an operator-level test
+`test_deferred_correction_3d` that builds a known-cubic-RHS
+problem (where $\partial_n^3 u^*$ is constant so $\tau_h$ is
+exact), runs Phases A+B, and verifies the corrected solution
+matches the analytic answer to round-off.  This is a stronger
+check than a convergence rate -- it exercises the
+$\hat{\tau}_h$ formula in isolation.
+
+### 7.4 What can go wrong, and how to catch it
+
+* **`tau_buf` wrong at corners.**  Cross-check: the sum of
+  $\tau$ over all interior cells should equal the sum of
+  boundary $\partial_n^3 u_h$ contributions scaled by
+  $h_a/24$, summed over each face independently.  Add an
+  assertion in development.
+
+* **Correction V-cycle slow.**  Same operator as Phase A, so
+  same rate constant.  Should converge in 20–40 V-cycles with
+  $\omega = 1.5$.  If we want to bound total cost at $\sim$1.5x
+  the current ctest time, drop `n_iters_corr` to 20.
+
+* **Singular Neumann.**  Both phases' $A$ is singular with the
+  same null space (constants).  Apply mean-zero projection of
+  $v$ at the end of Phase B before folding it in.
+
+* **Truncation estimate noisy at coarse $h$.**  At $N = 32$ the
+  4-point one-sided $\partial_n^3$ formula has $\mathcal{O}(h)$
+  accuracy, fine; at the coarsest CTest level (smaller-N
+  hierarchy levels during the V-cycle) the noise might
+  dominate.  Phase B is a one-shot correction so worst case the
+  corrected solution is no worse than $u_h$ -- verify
+  empirically.
+
+### 7.5 Why this preserves the M-matrix property
+
+Both phases solve $A u = b$ with the *same* $A$ -- the
+simple-ghost matrix that's already an M-matrix.  Phase B
+differs only in $b$ ($-\hat{\tau}_h$ instead of $f$) and BCs
+(homogeneous instead of inhomogeneous).  All of SOR's
+convergence guarantees carry through unchanged; $\omega = 1.5$
+stays stable.
+
+### 7.6 Verification plan
+
+| Preset | Pre-fix rate | Expected post-fix rate | Test reactivation |
+|---|---|---|---|
+| `manufactured_dirichlet_homog`/`inhomog` | 2.00 | 2.00 (Phase B contributes zero $\tau$ on pure D-D problems) | unchanged |
+| `manufactured_neumann_homog` | 2.00 | 2.00 (no change; $u''' = 0$ by symmetry, $\tau_h \equiv 0$) | already in CTest |
+| `manufactured_neumann_inhomog` | $\sim 1.65$ (excluded) | $\ge 1.8$ | **re-enable** in `CONVERGENCE_PRESETS` |
+| `manufactured_mixed` | 2.00 | 2.00 (same symmetry reason) | already in CTest |
+| `manufactured_mixed_inhomog` | $\sim 1.0$ (excluded) | $\ge 1.8$ | **re-enable** |
+
+### 7.7 Estimated cost and ordering
+
+| Item | Lines of code | Risk |
+|---|---|---|
+| `boundary_truncation_3d` helper | $\sim$80 | low |
+| Driver Phase A/B split | $\sim$30 | low |
+| Correction-solve BC swap | $\sim$20 | low (re-uses `bc_spec_homogenize`) |
+| New CTest entries | $\sim$5 | low |
+| Operator test for cubic RHS | $\sim$120 | low |
+
+Total: well under a day of focused work.
+
+Order: write the helper and the operator test first (so we have
+a known-good $\tau_h$ to validate against).  Then wire up Phase
+B in the driver.  Then run the singular-Neumann presets and
+tune `n_iters_corr`.  Finally re-enable the deferred CTest
+entries.
+
+### 7.8 Fallback if deferred correction underperforms
+
+If empirically the corrected rate sits at $\sim 1.5$ instead of
+$\sim 2$ -- most likely cause is the $\partial_n^3$ estimate
+being noisy at coarse $h$ -- escalate to **Krylov-wrapped
+V-cycle**.  Wrap the V-cycle in a Krylov outer iteration (CG for
+the singular-but-symmetric problem after deflating constants,
+or BiCGStab for the general case) and use the
+M-matrix-violating 4-point ghost as the discrete operator.  CG
+doesn't require the M-matrix property.  Implementation cost is
+roughly 2x the deferred-correction route -- a real Krylov outer
+loop, plus careful handling of the constant null space when the
+system is singular.
+
+## Other deferred work
 
 * **Replace per-rank JSON with a single HDF5 or MPI-IO file**
   (mentioned as the "Fix (larger, optional)" under the original
