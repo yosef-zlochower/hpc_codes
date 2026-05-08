@@ -219,6 +219,61 @@ on every face that is shared with another rank
 (\Cref{fig:ghost}).  The ghost width is fixed at $g_s = 1$,
 matching the seven-point stencil.
 
+\subsection{Per-axis layout for cell-centred
+  Neumann}\label{sec:cell-centred-layout}
+The grid above is \emph{vertex-centred}: a grid point lies on each
+physical-boundary face, which is the natural layout for Dirichlet BCs
+($u$ is prescribed at the boundary node).  For Neumann BCs the
+discrete compatibility $\sum f_h = 2\sum_{\partial\Omega} q/h$ does
+not match the continuous compatibility $\int f = \int q$, a
+factor-of-two artefact of the boundary node carrying full-cell
+weight in the row sum.  We therefore use a different layout
+\emph{per axis}, chosen by the BC pair on that axis:
+
+\begin{itemize}
+  \item \textbf{D--D axis (both ends Dirichlet)}: vertex-centred,
+    $N_a + 1$ grid points, lowest at $a_a$, highest at $b_a$, uniform
+    spacing $h_a = (b_a - a_a)/N_a$ throughout.  This is the original
+    layout above.
+  \item \textbf{N--N axis (both ends Neumann)}: cell-centred, $N_a + 2$
+    grid points, lowest at $a_a - h_a/2$, highest at $b_a + h_a/2$,
+    uniform spacing.  The two extra points are \emph{ghost cells};
+    \texttt{apply\_bc\_3d} writes them via the centred-difference
+    Neumann mirror $u_{\text{ghost}} = u_{\text{int}} + h_a\,q$, where
+    $q = \partial u/\partial n$ at the boundary plane (midway between
+    the ghost and the first interior cell centre).  Compatibility
+    becomes $\sum f_h = \sum_{\partial\Omega} q/h$, matching the
+    continuous condition under midpoint quadrature.
+  \item \textbf{D--N or N--D axis (hybrid)}: mixed -- the Dirichlet
+    end has the boundary-on-vertex layout, the Neumann end has the
+    cell-centred layout, and one inevitable \emph{half-step} of width
+    $h_a/2$ sits between the Dirichlet vertex and the first interior
+    cell centre on that axis.  Spacing is uniform $h_a$ everywhere
+    else.  At the cell adjacent to the Dirichlet vertex the
+    seven-point stencil is replaced on the affected axis by the
+    non-uniform 3-point formula
+    $u_{xx} \approx (4/(3h_a^2))(2u_v - 3u_i + u_{\text{far}})$
+    where $u_v$ is the vertex value and $u_{\text{far}}$ the
+    next-deeper interior cell.
+\end{itemize}
+
+The layout is encoded by per-face Neumann flags carried on
+\texttt{struct domain3d\_st}; the choice of layout is uniform across
+every multigrid level (\Cref{sec:hierarchy}) and is a property of
+the problem, not of the grid resolution.  Pure D--D problems are
+unaffected by these changes.
+
+The simple Neumann mirror has $\bigO(h^3)$ ghost truncation, which
+gives $\bigO(h)$ truncation in the boundary-cell Laplacian when
+$\partial^3_a u$ does not vanish at the boundary.  Globally this
+degrades the pointwise convergence rate to $\sim 1.5$ at $h = 1/128$
+on inhomogeneous Neumann presets where this derivative is
+non-zero (the homogeneous companions retain rate 2 by symmetry).
+The 4-point higher-order one-sided extrapolation
+$u_{\text{ghost}} = (21/23) u_1 + (3/23) u_2 - (1/23) u_3 + (24/23) h\, q$
+gives $\bigO(h^4)$ ghost truncation $\to$ rate 2 globally; it is
+deferred to a follow-up phase (see \texttt{Plan.md}).
+
 % =============================================================================
 \section{Stationary relaxation methods}\label{sec:relaxation}
 % =============================================================================

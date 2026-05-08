@@ -6,48 +6,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-/* ----- Per-rank sweep bounds for the smoother & defect kernels ----------
- *
- * On each rank, every face that is (a) a physical-boundary face and
- * (b) carries a Neumann condition forces the boundary node to be an
- * unknown rather than a constraint; the sweep range widens by one on
- * that side to include it.  Dirichlet faces (and faces handed off to
- * an MPI neighbour) keep the historical [gs, n-gs) range.
- *
- * The kernel uses the per-face Neumann flags to decide, at each
- * boundary node it visits, whether to mirror the off-domain neighbour
- * rather than read u[idx-1] / u[idx+1] etc., which would index
- * outside the array.
- */
-struct sweep_bounds_3d
-{
-    int64_t i_lo, i_hi;
-    int64_t j_lo, j_hi;
-    int64_t k_lo, k_hi;
-    bool    nx_lo_neumann, nx_hi_neumann;
-    bool    ny_lo_neumann, ny_hi_neumann;
-    bool    nz_lo_neumann, nz_hi_neumann;
-    /* Per-face Neumann data callback (q = du/dn).  NULL on homogeneous
-     * Neumann faces -- the kernel skips the 2 h q term in that case
-     * and the mirror reduces to the homogeneous form u_ghost = u_int. */
-    bc_fn_t q_x_lo, q_x_hi;
-    bc_fn_t q_y_lo, q_y_hi;
-    bc_fn_t q_z_lo, q_z_hi;
-};
-
-/* Pull the inhomogeneous-Neumann callback for face f from gfs->bc, or
- * NULL when the face is either non-Neumann or Neumann-homogeneous.
- * Coarse levels get NULL on every face because bc_spec_homogenize sets
- * homogeneous = true and value = NULL during hierarchy construction. */
-static inline bc_fn_t neumann_q(const struct ngfs_3d *gfs, face_id_t f)
-{
-    if (!gfs->bc) return NULL;
-    const struct bc_face_t *fb = &gfs->bc->face[f];
-    if (fb->kind != BC_NEUMANN) return NULL;
-    if (fb->homogeneous)        return NULL;
-    return fb->value;
-}
-
 /* "Has any Neumann face" predicates: an axis with at least one
  * Neumann face uses the cell-centred-with-extra-point layout
  * (CellCentred Phase 3).  In that layout the standard formula
@@ -55,43 +13,23 @@ static inline bc_fn_t neumann_q(const struct ngfs_3d *gfs, face_id_t f)
  * cell centre and at every Neumann ghost; Dirichlet vertices on
  * hybrid axes are at +/- h/2 from the formula's prediction and
  * apply_bc_3d adjusts explicitly.  Pure D-D axes have no extra
- * point and no shift -- the formula is exact for both vertices. */
+ * point and no shift -- the formula is exact for both vertices.
+ *
+ * Phase 3 unification: every Neumann face -- pure N-N or hybrid --
+ * has its ghost row written by apply_bc_3d via the cell-centred
+ * mirror u_ghost = u_int + h*q.  The smoother and defect kernels
+ * consequently never need an in-stencil mirror substitution; the
+ * sweep range is always [gs, nx-gs) and the 7-point stencil reads
+ * the ghost cell as a regular stored value.  The legacy
+ * sweep_bounds_3d struct, the in-stencil NEUMANN_MIRROR macro, and
+ * the q-callback lookup that fed it have all been removed
+ * (Phase 4 cleanup). */
 static inline bool axis_x_neumann(const struct ngfs_3d *gfs)
 { return gfs->domain.neumann_lower_x || gfs->domain.neumann_upper_x; }
 static inline bool axis_y_neumann(const struct ngfs_3d *gfs)
 { return gfs->domain.neumann_lower_y || gfs->domain.neumann_upper_y; }
 static inline bool axis_z_neumann(const struct ngfs_3d *gfs)
 { return gfs->domain.neumann_lower_z || gfs->domain.neumann_upper_z; }
-
-/* Phase 3 unification: every Neumann face -- whether the axis is
- * pure N-N or hybrid D-N / N-D -- has its ghost row written by
- * apply_bc_3d via the cell-centred mirror u_ghost = u_int + h*q.  The
- * smoother and defect kernels consequently never need an in-stencil
- * mirror substitution; the sweep range is always [gs, nx-gs) and the
- * 7-point stencil reads the ghost cell as a regular stored value.
- *
- * The legacy q-callback / Neumann-flag fields in sweep_bounds_3d are
- * retained for ABI but are now always false / NULL.  A Phase 4
- * cleanup will delete them. */
-static struct sweep_bounds_3d compute_sweep_bounds(const struct ngfs_3d *gfs)
-{
-    struct sweep_bounds_3d sb;
-    const int     gs = gfs->gs;
-    const int64_t nx = gfs->nx;
-    const int64_t ny = gfs->ny;
-    const int64_t nz = gfs->nz;
-
-    sb.i_lo = gs; sb.i_hi = nx - gs;
-    sb.j_lo = gs; sb.j_hi = ny - gs;
-    sb.k_lo = gs; sb.k_hi = nz - gs;
-    sb.nx_lo_neumann = sb.nx_hi_neumann = false;
-    sb.ny_lo_neumann = sb.ny_hi_neumann = false;
-    sb.nz_lo_neumann = sb.nz_hi_neumann = false;
-    sb.q_x_lo = sb.q_x_hi = NULL;
-    sb.q_y_lo = sb.q_y_hi = NULL;
-    sb.q_z_lo = sb.q_z_hi = NULL;
-    return sb;
-}
 
 /* ----- Per-face BC accessors ------------------------------------------------
  *
@@ -124,25 +62,35 @@ static inline bc_fn_t face_value(const struct ngfs_3d *gfs, face_id_t f, int var
 *     MPI neighbour are filled by sync_var_3d, not touched here.
 *
 *     Behaviour per face is determined by gfs->bc:
-*       * Dirichlet: face nodes are written.  When the face is
-*         homogeneous (or var != VAR_SOL, since the defect carries no
-*         inhomogeneous data of its own) the value is 0; otherwise the
-*         per-face callback supplies u(x,y,z).
-*       * Neumann: not yet implemented in Phase 2.  The function aborts
-*         via MPI_Abort if a Neumann face is encountered (Phase 3 adds
-*         the ghost-row write).
+*       * Dirichlet: the boundary node (i=0 or i=nx-1 on a pure D-D
+*         axis, or i=0 / i=nx-1 on the D end of a hybrid D-N / N-D
+*         axis) is *written* with the prescribed value g(x,y,z).  On
+*         hybrid axes the vertex's physical coordinate is shifted by
+*         +/-h/2 from the standard x = gfs->x0 + i*dx formula
+*         (because the axis is shifted by -h/2 to give correct cell
+*         coordinates) -- the writes below add the +/-h/2 fix-up.
+*         When the face is homogeneous (or var != VAR_SOL, since the
+*         defect carries no inhomogeneous data of its own) the value
+*         is 0; otherwise the per-face callback supplies u(x,y,z).
+*       * Neumann: the ghost row at i=0 (lower) or i=nx-1 (upper) is
+*         written via the cell-centred mirror u_ghost = u_int + h*q,
+*         where q is the user's outward-normal-derivative callback
+*         and h is the per-axis spacing.  The boundary plane lies at
+*         the midpoint of the ghost and the first interior cell
+*         centre -- coordinate gfs->x0 + h/2 (lower) or gfs->x0 +
+*         (nx-1)*dx - h/2 (upper).
 *
-*     When gfs->bc == NULL, every face defaults to homogeneous Dirichlet
-*     -- the historical behaviour that operator-level unit tests rely on.
+*     When gfs->bc == NULL, every face defaults to homogeneous
+*     Dirichlet -- the historical behaviour that operator-level unit
+*     tests rely on.
 * Input Variables:
 *     gfs: struct ngfs_3d*, 3D grid function container
 *     var: int, index of the variable in gfs->vars[] to apply BCs to
 * Output Variables:
-*     gfs->vars[var]->val: double*, physical-boundary face points are
-*         updated according to the per-face spec
+*     gfs->vars[var]->val: double*, physical-boundary nodes (D vertex)
+*         and ghost rows (N face) updated according to the per-face spec
 * Return Values and indicators of success / failure
-*     (none).  May call MPI_Abort if a Neumann face is encountered
-*     before Phase 3 lands the implementation.
+*     (none)
 *******************************************************************/
 void apply_bc_3d(struct ngfs_3d *gfs, int var)
 {
@@ -490,13 +438,7 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
 
     /* Sweep range: under CellCentred Phase 3 every Neumann face has
      * its ghost row written by apply_bc_3d before each sweep, so the
-     * smoother always stays inside [gs, nx-gs).  compute_sweep_bounds
-     * preserves the legacy in-stencil-mirror flags as `false` for
-     * ABI continuity; they are retained as dead branches in the
-     * kernel below and will be removed in a Phase 4 cleanup. */
-    const struct sweep_bounds_3d sb = compute_sweep_bounds(gfs);
-
-    (void)sb;  /* mirror flags unused in Phase 3; kept in struct for ABI */
+     * smoother always stays inside [gs, nx-gs) on every axis. */
 
     /* Hybrid axis flags: a hybrid axis has D on one end and N on
      * the other.  At the cell adjacent to the D vertex the gap to

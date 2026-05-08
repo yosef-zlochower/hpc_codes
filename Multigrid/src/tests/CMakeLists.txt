@@ -22,6 +22,7 @@ set(TEST_BINS
     test_prolong_2d test_prolong_3d
     test_restrict_nl_2d test_restrict_nl_3d
     test_prolong_nl_2d  test_prolong_nl_3d
+    test_restrict_cc_3d test_prolong_cc_3d
 )
 
 foreach(name IN LISTS TEST_BINS)
@@ -44,6 +45,8 @@ set(TEST_SCRIPTS
     run_test_prolong.sh
     run_test_restrict_nl.sh
     run_test_prolong_nl.sh
+    run_test_restrict_cc.sh
+    run_test_prolong_cc.sh
     run_test_parser.sh
     run_test_convergence.sh
 )

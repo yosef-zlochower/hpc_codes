@@ -146,9 +146,11 @@ Contains standalone Python/Numba implementations (1D, 2D, 3D) used as reference 
 Each operator-level test binary exercises a specific operation (domain
 decomposition, hierarchy creation, injection, restriction, prolongation)
 in both 2D and 3D. Test scripts invoke `mpirun --map-by :OVERSUBSCRIBE`
-so tests run on any machine regardless of core count. Python verification
-scripts reconstruct the global field from per-rank JSON files and check
-correctness.
+so tests run on any machine regardless of core count. Most use Python
+verifiers (`verify.py`, `verify_zeros.py`, etc.) that reconstruct the
+global field from per-rank JSON files; the cell-centred operator tests
+(`test_restrict_cc_3d`, `test_prolong_cc_3d`) check pass/fail in C
+directly and don't need a Python helper.
 
 In addition to the operator-level tests, `run_test_convergence.sh` runs
 the full driver against an auto-generated TOML at three grid resolutions
@@ -156,3 +158,11 @@ the full driver against an auto-generated TOML at three grid resolutions
 `|u - u_exact|_inf`, and asserts that the empirical convergence rate on
 the finest pair lies in `[1.8, 2.3]`. The expected rate for the
 seven-point Laplacian on this manufactured solution is exactly 2.
+
+Two presets in `problem_registry.c` are intentionally excluded from
+the convergence test list (see `Plan.md` "Known limitations"):
+`manufactured_neumann_inhomog` and `manufactured_mixed_inhomog`.  Both
+are blocked by the same O(h)-truncation issue at boundary cells when
+the exact solution has non-zero higher derivatives there; the fix is
+the 4-point higher-order ghost extrapolation, scheduled for a
+follow-up phase.
