@@ -1,0 +1,564 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage{cleveref}
+
+% --- code listings (match documentation.tex's style) ------------------------
+\definecolor{codegray}{gray}{0.96}
+\definecolor{codecmnt}{rgb}{0.25,0.50,0.25}
+\definecolor{codekw}{rgb}{0.10,0.10,0.55}
+\definecolor{codestr}{rgb}{0.55,0.10,0.10}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codegray},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecmnt}\itshape,
+  stringstyle=\color{codestr},
+  numbers=left, numberstyle=\tiny\color{gray},
+  stepnumber=1, numbersep=6pt,
+  frame=single, framerule=0pt,
+  breaklines=true, breakatwhitespace=true,
+  showstringspaces=false,
+  captionpos=b,
+  language=C,
+  morekeywords={int64_t,size_t,bool,struct,scalar_field_fn,bc_fn_t,face_id_t,
+                bc_kind_t,problem_t,bc_spec_t,bc_face_t,
+                FACE_LOWER_X,FACE_UPPER_X,FACE_LOWER_Y,FACE_UPPER_Y,
+                FACE_LOWER_Z,FACE_UPPER_Z,
+                BC_DIRICHLET,BC_NEUMANN,
+                DIRICHLET_HOMOG_FACE,DIRICHLET_INHOMOG_FACE,
+                NEUMANN_HOMOG_FACE,NEUMANN_INHOMOG_FACE}
+}
+
+\title{Multigrid Solver -- User Tutorial:\\ Adding Your Own Problem}
+\author{}
+\date{}
+
+\newcommand{\Linf}{L^{\infty}}
+\newcommand{\bigO}{\mathcal{O}}
+
+\begin{document}
+\maketitle
+
+% =============================================================================
+\section{Scope and prerequisites}
+% =============================================================================
+
+This tutorial walks through adding a new Poisson problem to the
+solver: a right-hand side $f$, per-face boundary data, optionally an
+exact solution for error reporting, and the TOML invocation that
+runs it.  The code excerpts shown in \Cref{sec:example1,sec:example2}
+are cut-and-paste ready -- the only edits you make are to
+\texttt{src/problem\_registry.c}.
+
+The tutorial assumes you have already:
+\begin{enumerate}
+\item Built the test configuration once and run \texttt{ctest}
+      successfully (see \texttt{src/CLAUDE.md} or
+      \texttt{Documentation.md} \S 10).
+\item Installed Python~3 with \texttt{numpy} and \texttt{h5py} (used
+      by the verifiers and \texttt{scripts/make\_xdmf.py}).
+\item Have ParaView or VisIt available for visual inspection (optional
+      but recommended).
+\end{enumerate}
+
+The reference for the discretisation itself lives in
+\texttt{doc/documentation.tex}.
+
+% =============================================================================
+\section{The model problem}\label{sec:model}
+% =============================================================================
+
+The solver discretises the 3D Poisson equation
+\begin{equation}
+  \Delta u(x,y,z) \;=\; f(x,y,z)
+  \quad\text{on}\quad
+  \Omega = [a_x, b_x] \times [a_y, b_y] \times [a_z, b_z],
+  \label{eq:poisson}
+\end{equation}
+with per-face boundary data: each of the six faces of $\Omega$
+carries either a Dirichlet condition $u = g_{\text{face}}$ or a
+Neumann condition $\partial u / \partial n = q_{\text{face}}$, where
+$n$ is the outward normal.
+
+To register a new problem you supply
+\begin{itemize}[topsep=0pt,itemsep=2pt]
+\item one C function for $f(x, y, z)$,
+\item one C function per inhomogeneous face for $g$ or $q$ (you may
+      use a single function that dispatches on the face id),
+\item per-face flags saying which kind of BC each face carries, and
+\item optionally, a C function for the exact solution $u^\star$ so
+      the driver can print $\|u_h - u^\star\|_{\Linf}$ at exit.
+\end{itemize}
+You drop these into a \texttt{problem\_t} literal at the bottom of
+\texttt{src/problem\_registry.c} and rebuild.
+
+% =============================================================================
+\section{The user-facing API}\label{sec:api}
+% =============================================================================
+
+Three types are involved.  All three live in \texttt{src/problem.h}
+and \texttt{src/bc.h} and you do not modify them -- you just
+instantiate them.
+
+\subsection{Callback signatures}
+
+Two function-pointer typedefs cover every callback you will write:
+\begin{lstlisting}
+typedef double (*scalar_field_fn)(double x, double y, double z);
+typedef double (*bc_fn_t)(double x, double y, double z, face_id_t face);
+\end{lstlisting}
+\texttt{scalar\_field\_fn} is used for $f$ and (optionally) $u^\star$:
+both are functions of the three spatial coordinates only.
+\texttt{bc\_fn\_t} carries an extra \texttt{face} argument so a single
+function can serve every face that takes data from the same formula
+(see \Cref{sec:example2} for an example).
+
+\subsection{Per-face BC kinds}
+
+A per-face entry is a \texttt{bc\_face\_t}:
+\begin{lstlisting}
+struct bc_face_t {
+    bc_kind_t kind;        /* BC_DIRICHLET or BC_NEUMANN */
+    bool      homogeneous; /* true => value/flux is identically 0 */
+    bc_fn_t   value;       /* may be NULL when homogeneous == true */
+};
+\end{lstlisting}
+Four convenience macros are defined at the top of
+\texttt{problem\_registry.c} so the registry table reads naturally:
+\begin{lstlisting}
+#define DIRICHLET_HOMOG_FACE          { BC_DIRICHLET, true,  NULL }
+#define DIRICHLET_INHOMOG_FACE(cb)    { BC_DIRICHLET, false, (cb) }
+#define NEUMANN_HOMOG_FACE            { BC_NEUMANN,   true,  NULL }
+#define NEUMANN_INHOMOG_FACE(cb)      { BC_NEUMANN,   false, (cb) }
+\end{lstlisting}
+The six faces are addressed by name:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Face identifier & Outward normal & Where the formula evaluates \\
+\midrule
+\texttt{FACE\_LOWER\_X} & $-\hat{x}$ & $x = a_x$ \\
+\texttt{FACE\_UPPER\_X} & $+\hat{x}$ & $x = b_x$ \\
+\texttt{FACE\_LOWER\_Y} & $-\hat{y}$ & $y = a_y$ \\
+\texttt{FACE\_UPPER\_Y} & $+\hat{y}$ & $y = b_y$ \\
+\texttt{FACE\_LOWER\_Z} & $-\hat{z}$ & $z = a_z$ \\
+\texttt{FACE\_UPPER\_Z} & $+\hat{z}$ & $z = b_z$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The problem record}
+
+Everything bundles into a \texttt{problem\_t}:
+\begin{lstlisting}
+struct problem_t {
+    const char        *name;     /* selected by TOML [problem] name = "..." */
+    struct bc_spec_t   bc;       /* 6 entries, indexed by face_id_t */
+    scalar_field_fn    rhs;      /* f(x,y,z); must be non-NULL */
+    scalar_field_fn    u_exact;  /* optional; NULL if no closed form */
+    bool               singular; /* true => mean-zero projection. Set
+                                  * this only for the all-Neumann case,
+                                  * which we recommend you avoid. */
+};
+\end{lstlisting}
+You append your new record to the \texttt{g\_problems[]} array near
+the bottom of \texttt{problem\_registry.c}.  The array is
+NULL-terminated -- the existing sentinel record at the very end stays
+where it is; insert your record above it.
+
+% =============================================================================
+\section{Example 1 -- All-Dirichlet}\label{sec:example1}
+% =============================================================================
+
+\subsection{The problem}
+
+We pick a manufactured solution
+\begin{equation}
+  u^\star(x,y,z) \;=\; \sin(\pi x)\,\sin(\pi y)\,\sin(\pi z)
+  \quad\text{on}\quad [0,1]^3,
+  \label{eq:ex1-u}
+\end{equation}
+so the right-hand side is
+\begin{equation}
+  f(x,y,z) \;=\; \Delta u^\star \;=\; -3\pi^2\,u^\star(x,y,z).
+  \label{eq:ex1-f}
+\end{equation}
+Every face has $u^\star \equiv 0$ (one of $\sin(\pi\cdot 0)$ or
+$\sin(\pi\cdot 1)$ is always zero on the unit cube), so all six faces
+carry \emph{homogeneous} Dirichlet data and we do not need a boundary
+callback at all.
+
+\subsection{The code}
+
+Paste the following block into \texttt{src/problem\_registry.c},
+above the sentinel \texttt{\{ .name = NULL \}} record at the end of
+\texttt{g\_problems[]}.  The two static helpers go above the array;
+the literal goes inside it.
+
+\begin{lstlisting}[caption={Example 1: code to add to {\tt src/problem\_registry.c}.}]
+/* ============================================================
+ * tutorial_example_1
+ *
+ *   u*(x,y,z) = sin(pi x) sin(pi y) sin(pi z)
+ *   f (x,y,z) = -3 pi^2 u*
+ *   homogeneous Dirichlet on every face.
+ * ============================================================ */
+static double tut1_rhs(double x, double y, double z)
+{
+    const double pi  = 3.14159265358979323846;
+    const double pi2 = pi * pi;
+    return -3.0 * pi2 * sin(pi * x) * sin(pi * y) * sin(pi * z);
+}
+
+static double tut1_exact(double x, double y, double z)
+{
+    const double pi = 3.14159265358979323846;
+    return sin(pi * x) * sin(pi * y) * sin(pi * z);
+}
+
+/* ---- inside g_problems[], before the {.name=NULL} sentinel ---- */
+{
+    .name = "tutorial_example_1",
+    .bc   = {
+        .face = {
+            [FACE_LOWER_X] = DIRICHLET_HOMOG_FACE,
+            [FACE_UPPER_X] = DIRICHLET_HOMOG_FACE,
+            [FACE_LOWER_Y] = DIRICHLET_HOMOG_FACE,
+            [FACE_UPPER_Y] = DIRICHLET_HOMOG_FACE,
+            [FACE_LOWER_Z] = DIRICHLET_HOMOG_FACE,
+            [FACE_UPPER_Z] = DIRICHLET_HOMOG_FACE,
+        },
+    },
+    .rhs      = tut1_rhs,
+    .u_exact  = tut1_exact,
+    .singular = false,
+},
+\end{lstlisting}
+
+\subsection{The TOML parameter file}
+
+\begin{lstlisting}[language={},caption={\tt tutorial1.toml}]
+[grid]
+nx_cells = 64
+ny_cells = 64
+nz_cells = 64
+
+[solver]
+multigrid = true
+omega     = 1.5
+n_smooth  = 2
+n_iters   = 40
+tol       = 1.0e-12
+subcycles = 1
+min_cells = 2
+
+[problem]
+name = "tutorial_example_1"
+
+[output]
+dir = "out_tut1"
+\end{lstlisting}
+
+\subsection{Build and run}
+
+\begin{lstlisting}[language=bash]
+cmake --build build -j
+mpirun -np 1 build/src/driver_multigrid tutorial1.toml
+\end{lstlisting}
+The driver prints one progress line per V-cycle and, at exit, the
+quantity
+\[
+  \|u_h - u^\star\|_{\Linf} \;\equiv\; \max_{ijk}\,
+  | u_h(x_i, y_j, z_k) - u^\star(x_i, y_j, z_k) |.
+\]
+On a uniform $\bigO(h^2)$ scheme this should approximately quarter
+each time you double \texttt{nx\_cells} (etc.).  Try $N = 32, 64,
+128$ and confirm the ratio of successive errors is close to 4.
+
+\subsection{Visualise}
+
+\begin{lstlisting}[language=bash]
+python3 scripts/make_xdmf.py --dir out_tut1
+paraview out_tut1/multigrid.xmf
+\end{lstlisting}
+ParaView shows a smooth bump that peaks at $u \approx 1$ at the
+domain centre and vanishes on every face -- exactly $u^\star$.
+
+% =============================================================================
+\section{Example 2 -- Mixed: three Dirichlet + three Neumann}\label{sec:example2}
+% =============================================================================
+
+\subsection{The problem}
+
+This example uses a manufactured solution where every face carries
+genuinely non-zero data, so you exercise both the Dirichlet and the
+Neumann callback paths:
+\begin{equation}
+  u^\star(x,y,z) \;=\; e^{x+y+z}
+  \quad\text{on}\quad [0,1]^3.
+  \label{eq:ex2-u}
+\end{equation}
+Then $\Delta u^\star = 3\,u^\star$, so
+\begin{equation}
+  f(x,y,z) \;=\; 3\,e^{x+y+z}.
+  \label{eq:ex2-f}
+\end{equation}
+We pick \emph{inhomogeneous Dirichlet} on the three lower faces and
+\emph{inhomogeneous Neumann} on the three upper faces:
+\[
+\begin{array}{lcl}
+  \text{lower-}x\;(x=0) & : & u = e^{y+z}, \\
+  \text{lower-}y\;(y=0) & : & u = e^{x+z}, \\
+  \text{lower-}z\;(z=0) & : & u = e^{x+y}, \\
+  \text{upper-}x\;(x=1) & : & \partial u / \partial n = +\partial u / \partial x = e^{1+y+z}, \\
+  \text{upper-}y\;(y=1) & : & \partial u / \partial n = +\partial u / \partial y = e^{x+1+z}, \\
+  \text{upper-}z\;(z=1) & : & \partial u / \partial n = +\partial u / \partial z = e^{x+y+1}.
+\end{array}
+\]
+With three Dirichlet faces present the system is non-singular -- no
+mean-zero projection is needed and the V-cycle converges to the
+discrete solution without any iterative-side workarounds.
+
+\subsection{The outward-normal convention}
+
+The single most common gotcha when adding a Neumann problem is the
+sign of $q = \partial u / \partial n$:
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Face & Outward normal & $q$ formula \\
+\midrule
+\texttt{FACE\_LOWER\_X} & $-\hat{x}$ & $-\,\partial u/\partial x$ \\
+\texttt{FACE\_UPPER\_X} & $+\hat{x}$ & $+\,\partial u/\partial x$ \\
+\texttt{FACE\_LOWER\_Y} & $-\hat{y}$ & $-\,\partial u/\partial y$ \\
+\texttt{FACE\_UPPER\_Y} & $+\hat{y}$ & $+\,\partial u/\partial y$ \\
+\texttt{FACE\_LOWER\_Z} & $-\hat{z}$ & $-\,\partial u/\partial z$ \\
+\texttt{FACE\_UPPER\_Z} & $+\hat{z}$ & $+\,\partial u/\partial z$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+A useful sanity check: if you accidentally flip the sign on one face,
+the discrete error will not converge to zero as $h \to 0$.
+
+\subsection{The code}
+
+\begin{lstlisting}[caption={Example 2: code to add to {\tt src/problem\_registry.c}.}]
+/* ============================================================
+ * tutorial_example_2
+ *
+ *   u*(x,y,z) = exp(x + y + z)
+ *   f (x,y,z) = 3 exp(x + y + z)
+ *   Lower faces: inhomogeneous Dirichlet
+ *   Upper faces: inhomogeneous Neumann
+ *
+ * For u* = e^(x+y+z) the outward-normal derivative on every upper
+ * face equals u* evaluated at that face (since du/dx = du/dy =
+ * du/dz = u*).  A single bc_fn_t therefore serves all three Neumann
+ * faces; the face argument is ignored because the caller has
+ * already pinned the appropriate coordinate to 0 or 1 before
+ * invoking the callback.
+ * ============================================================ */
+
+static double tut2_rhs(double x, double y, double z)
+{
+    return 3.0 * exp(x + y + z);
+}
+
+static double tut2_exact(double x, double y, double z)
+{
+    return exp(x + y + z);
+}
+
+static double tut2_dirichlet(double x, double y, double z, face_id_t face)
+{
+    (void)face;             /* the caller pins x/y/z=0 on each lower face */
+    return exp(x + y + z);
+}
+
+static double tut2_neumann(double x, double y, double z, face_id_t face)
+{
+    (void)face;             /* du/dx = du/dy = du/dz = u* for this u*    */
+    return exp(x + y + z);
+}
+
+/* ---- inside g_problems[], before the {.name=NULL} sentinel ---- */
+{
+    .name = "tutorial_example_2",
+    .bc   = {
+        .face = {
+            [FACE_LOWER_X] = DIRICHLET_INHOMOG_FACE(tut2_dirichlet),
+            [FACE_LOWER_Y] = DIRICHLET_INHOMOG_FACE(tut2_dirichlet),
+            [FACE_LOWER_Z] = DIRICHLET_INHOMOG_FACE(tut2_dirichlet),
+            [FACE_UPPER_X] = NEUMANN_INHOMOG_FACE  (tut2_neumann),
+            [FACE_UPPER_Y] = NEUMANN_INHOMOG_FACE  (tut2_neumann),
+            [FACE_UPPER_Z] = NEUMANN_INHOMOG_FACE  (tut2_neumann),
+        },
+    },
+    .rhs      = tut2_rhs,
+    .u_exact  = tut2_exact,
+    .singular = false,
+},
+\end{lstlisting}
+
+A common alternative pattern, when the data on each face takes a
+\emph{different} formula, is to dispatch on the \texttt{face} argument
+inside one callback rather than registering a separate function per
+face.  The skeleton looks like
+\begin{lstlisting}
+static double my_neumann(double x, double y, double z, face_id_t face)
+{
+    switch (face) {
+    case FACE_LOWER_X: return /* formula for q at x = a_x */;
+    case FACE_UPPER_X: return /* formula for q at x = b_x */;
+    case FACE_LOWER_Y: return /* formula for q at y = a_y */;
+    /* ... */
+    default: return 0.0;
+    }
+}
+\end{lstlisting}
+Either style is fine; \texttt{tut2\_neumann} above happens to be the
+same expression on every face so the dispatch is unnecessary.
+
+\subsection{The TOML parameter file}
+
+\begin{lstlisting}[language={},caption={\tt tutorial2.toml}]
+[grid]
+nx_cells = 64
+ny_cells = 64
+nz_cells = 64
+
+[solver]
+multigrid = true
+omega     = 1.5
+n_smooth  = 2
+n_iters   = 40
+tol       = 1.0e-12
+subcycles = 1
+min_cells = 2
+
+[problem]
+name = "tutorial_example_2"
+
+[output]
+dir = "out_tut2"
+\end{lstlisting}
+
+\subsection{Build, run, visualise}
+
+\begin{lstlisting}[language=bash]
+cmake --build build -j
+mpirun -np 8 build/src/driver_multigrid tutorial2.toml
+python3 scripts/make_xdmf.py --dir out_tut2
+paraview out_tut2/multigrid.xmf
+\end{lstlisting}
+Expect the same rate-2 behaviour as \Cref{sec:example1}: the
+$\|u_h - u^\star\|_{\Linf}$ printed at exit should drop by a factor of
+roughly 4 each time you double \texttt{nx\_cells}.
+
+% =============================================================================
+\section{Verifying your solution}\label{sec:verify}
+% =============================================================================
+
+Three complementary checks:
+
+\begin{enumerate}
+\item \textbf{Closed-form error.}  When you supply \texttt{.u\_exact},
+      the driver prints $\|u_h - u^\star\|_{\Linf}$ at exit.  Running
+      the same TOML at $N = 32, 64, 128$ should give a ratio of
+      successive errors near~4 (rate~2).  This is the strongest check
+      available -- if it passes, the discretisation, BCs, and RHS are
+      all consistent.
+
+\item \textbf{Defect history.}  Each iteration prints
+      $|d_h|_{\Linf} = |L_h u_h - f_h|_{\Linf}$.  It should drop
+      monotonically and reach \texttt{tol} well before
+      \texttt{n\_iters} is exhausted.  A flat plateau at $\sim 10^{-2}$
+      almost always means the system is singular -- check that at
+      least one face is Dirichlet (see \Cref{sec:pitfalls}).
+
+\item \textbf{Visual.}  Open \texttt{multigrid.xmf} in ParaView and
+      eyeball the field for the expected shape, smoothness, and
+      boundary behaviour.  Cell-centred ghost slots are filtered out
+      by \texttt{make\_xdmf.py}; Dirichlet vertex slots are rendered
+      at the physical boundary.
+\end{enumerate}
+
+% =============================================================================
+\section{Conventions and pitfalls}\label{sec:pitfalls}
+% =============================================================================
+
+\paragraph{Domain bounds.}
+The default domain is $[0,1]^3$.  To use a different box, add
+\texttt{x0}, \texttt{xN}, \texttt{y0}, \texttt{yN}, \texttt{z0},
+\texttt{zN} keys to the \texttt{[grid]} section of the TOML.  Your
+callbacks receive \emph{user-frame} coordinates, i.e. the same
+$(x,y,z)$ values you used in your formulas above.  The cell-centred
+internal coordinate shift on Neumann-bearing axes (see
+\texttt{Documentation.md} \S2) is invisible to your callbacks.
+
+\paragraph{Outward-normal sign for Neumann data.}
+Repeated from \Cref{sec:example2} because it is the single most
+common bug: $q$ is the \emph{outward}-normal derivative, so $q$ on
+the lower-$x$ face is $-\partial u/\partial x$ at $x = a_x$, while
+$q$ on the upper-$x$ face is $+\partial u/\partial x$ at $x = b_x$.
+If your error fails to converge to zero, this is the first place to
+look.
+
+\paragraph{Avoid all-Neumann.}
+The all-Neumann problem is singular: $u + c$ is a solution whenever
+$u$ is.  The discrete operator inherits this null space, and the
+V-cycle's mean-zero projection plus per-iteration re-injection of
+the constant mode interact badly -- the defect plateaus at
+$\sim 10^{-2}$ even though the discretisation itself is rate~2.
+Pin at least one face to Dirichlet.  See \texttt{Plan.md} "Known
+limitations" for the diagnosis.
+
+\paragraph{Compatibility.}
+With even a single Dirichlet face present, the system is
+non-singular and no additional care is needed.  No discrete
+compatibility condition between $f$ and $q$ needs to be verified.
+
+\paragraph{Names and uniqueness.}
+The \texttt{.name} field is what you cite from the TOML's
+\texttt{[problem] name = "..."} key.  It must be unique across
+\texttt{g\_problems[]}; \texttt{problem\_lookup} returns the first
+match in array order.
+
+% =============================================================================
+\section{Where to look next}
+% =============================================================================
+
+\begin{description}[leftmargin=2em,style=nextline]
+\item[\texttt{src/problem.h}, \texttt{src/bc.h}]
+  Type definitions and the convenience macros for per-face BC entries.
+\item[\texttt{src/problem\_registry.c}]
+  Six built-in presets, ordered from simple to complex.  Pick the one
+  closest to your new problem and copy the structure -- the existing
+  Dirichlet-inhomog and mixed-inhomog presets are particularly
+  instructive.
+\item[\texttt{src/problem\_helpers.c}]
+  The L${}^\infty$ error reduction and the mean-zero projection.  You
+  do not need to touch this file when adding a new problem; it
+  documents the helpers the driver calls into.
+\item[\texttt{doc/documentation.tex}]
+  The reference description of the discretisation and the V-cycle.
+\item[\texttt{Plan.md}]
+  Outstanding limitations and design notes, including the singular
+  all-Neumann issue mentioned above.
+\end{description}
+
+\end{document}
