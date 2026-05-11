@@ -382,8 +382,43 @@ roughly 2x the deferred-correction route -- a real Krylov outer
 loop, plus careful handling of the constant null space when the
 system is singular.
 
-## Other deferred work
+## Output: HDF5 with XDMF sidecar (landed)
 
-* **Replace per-rank JSON with a single HDF5 or MPI-IO file**
-  (mentioned as the "Fix (larger, optional)" under the original
-  §5.1).  Independent of the boundary-stencil work.
+Per-rank JSON output was replaced by per-rank HDF5 in three phases:
+
+1. **HDF5 writer.**  New `src/HDF5BinaryWrite.{c,h}` (~290 lines)
+   exposes `BinaryWriteArray_2d` / `BinaryWriteArray_3d`.  Each rank
+   writes one file `rank_<R>.h5`; the first call creates the file
+   and writes a `/metadata` group (grid dims, spacings, internally-
+   shifted origins, ghost-zone count, per-face Neumann flags,
+   per-face has-neighbour flags); subsequent calls append additional
+   `/<vname>` datasets.  `src/io.{c,h}` thin-wraps these via
+   `output_2d_gf` / `output_3d_gf` (signatures unchanged).
+   `find_package(HDF5 REQUIRED COMPONENTS C HL)` -- serial library
+   only, no parallel HDF5 required.
+
+2. **XDMF generator.**  New `scripts/make_xdmf.py` walks every
+   `rank_*.h5` in a run directory and writes a
+   `<dir>/multigrid.xmf` sidecar.  The XMF references each rank's
+   HDF5 dataset via a HyperSlab and emits explicit per-axis vertex
+   coordinates (`VXVYVZ`).  Hybrid Dirichlet vertex slots are
+   rendered at the physical boundary (with a `h/2` gap to the first
+   cell centre); pure-Neumann ghost slots are skipped; adjacent
+   ranks share one point at each internal MPI interface (no visual
+   gap).  ParaView / VisIt / PyVista open the `.xmf` directly with
+   no data conversion.
+
+3. **Verifier switch.**  New `src/tests/h5read.py` factors out the
+   per-rank read into a single `load_rank(rank, varname)` helper
+   whose return dict mirrors the legacy JSON field names, so
+   `verify.py`, `verify_zeros.py`, `verify_nl_restrict.py`, and
+   `verify_nl_prolong.py` each needed only a one-line change at
+   the I/O boundary.  `verify_convergence.py` was untouched (it
+   parses driver stdout, not files).  New CTest entry
+   `test_make_xdmf` is an end-to-end smoke test: runs the driver at
+   np=2, invokes `make_xdmf.py`, validates the resulting `.xmf` is
+   well-formed XML, that every referenced HDF5 dataset exists, and
+   that the per-rank slabs assemble into a global grid with the
+   expected unique vertex count.
+
+ctest: 15/15 passing (was 14; new entry `test_make_xdmf`).

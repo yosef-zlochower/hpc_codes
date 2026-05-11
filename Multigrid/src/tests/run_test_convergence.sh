@@ -97,7 +97,7 @@ run_one()
     mpirun --map-by :OVERSUBSCRIBE -np "$nproc" "$DRIVER" "$toml" \
         >"$log" 2>&1
     check
-    rm -f Var*_rank_*.json VAR_*_rank_*.json
+    rm -f rank_*.h5
 }
 
 # verify <log1> <log2> <log3>

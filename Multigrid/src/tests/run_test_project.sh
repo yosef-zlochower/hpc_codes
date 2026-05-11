@@ -13,7 +13,7 @@ run_verify()
 {
     python verify.py
     check
-    rm -f Var0_rank_*.json
+    rm -f rank_*.h5
 }
 
 for mode in inject restrict; do

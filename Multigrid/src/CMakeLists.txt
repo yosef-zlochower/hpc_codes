@@ -23,14 +23,20 @@ add_library(multigrid_solver STATIC
     multigrid.c
     gauss_seidel.c
     io.c
+    HDF5BinaryWrite.c
     bc.c
     problem_registry.c
     problem_helpers.c
 )
 
-target_link_libraries(multigrid_solver PUBLIC MPI::MPI_C m)
+target_link_libraries(multigrid_solver PUBLIC
+    MPI::MPI_C
+    ${HDF5_C_LIBRARIES}
+    ${HDF5_HL_LIBRARIES}
+    m)
 target_include_directories(multigrid_solver PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR})
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${HDF5_INCLUDE_DIRS})
 
 # -----------------------------------------------------------------------------
 # Parameter parser — C++ (toml++ wrapper)

@@ -1,175 +1,77 @@
-#include "gf.h"
-#include "domain.h"
-#include <errno.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <mpi.h>
+#include "io.h"
 
-/******************************************************************
-* Purpose: Write the local patch of a 2D grid variable to a JSON file named
-*     "<vname>_rank_<rank>.json" (or "VAR_<var>_rank_<rank>.json" if the
-*     variable has no name). The JSON includes grid metadata (nx, ny, dx, dy,
-*     x0, y0, local and global offsets, rank info, ghost presence flags) and
-*     the full local data array as a nested JSON array [ny][nx].
-* Input Variables:
-*     gfs: struct ngfs_2d*, grid function container
-*     var: int, index of the variable to output
-* Output:
-*     A JSON file written to the current working directory.
-* Return Values and indicators of success / failure
-*     (none)
-*******************************************************************/
-void output_2d_gf(struct ngfs_2d *gfs, int var, const char *dir)
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "HDF5BinaryWrite.h"
+#include "gf.h"
+
+/* Build the per-rank output filename used by both output_2d_gf and
+ * output_3d_gf.  Filename pattern:
+ *
+ *     <dir>/rank_<R>.h5
+ *
+ * Each rank writes to its own file; multiple variables (multiple
+ * calls to output_*_gf for the same rank) are appended into the same
+ * file as separate datasets under `/`. */
+static void build_rank_filename(char *buf, size_t buflen,
+                                const char *dir, int rank)
 {
-    char fname[256];
     const char *prefix = (dir && dir[0]) ? dir : ".";
-    if (gfs->vars[var]->vname)
-    {
-        snprintf(fname, sizeof(fname), "%s/%s_rank_%d.json",
-                 prefix, gfs->vars[var]->vname, gfs->domain.rank);
-    }
-    else
-    {
-        snprintf(fname, sizeof(fname), "%s/VAR_%d_rank_%d.json",
-                 prefix, var, gfs->domain.rank);
-    }
-    FILE *f = fopen(fname, "w");
-    if (!f)
-    {
-        fprintf(stderr, "rank %d: cannot open '%s' for writing: %s\n",
-                gfs->domain.rank, fname, strerror(errno));
-        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-    }
-    fprintf(f, "{\n");
-    fprintf(f, "    \"nx\": %ld,\n", (long)gfs->nx);
-    fprintf(f, "    \"ny\": %ld,\n", (long)gfs->ny);
-    fprintf(f, "    \"dx\": %20.16e,\n", gfs->dx);
-    fprintf(f, "    \"dy\": %20.16e,\n", gfs->dy);
-    fprintf(f, "    \"x0\": %20.16e,\n", gfs->x0);
-    fprintf(f, "    \"y0\": %20.16e,\n", gfs->y0);
-    fprintf(f, "    \"local_i0\": %ld,\n", (long)gfs->domain.local_i0);
-    fprintf(f, "    \"local_j0\": %ld,\n", (long)gfs->domain.local_j0);
-    fprintf(f, "    \"global_cells_x\": %ld,\n", (long)gfs->domain.global_nx_cells);
-    fprintf(f, "    \"global_cells_y\": %ld,\n", (long)gfs->domain.global_ny_cells);
-    fprintf(f, "    \"global_x0\": %20.16e,\n", gfs->domain.global_x0);
-    fprintf(f, "    \"global_y0\": %20.16e,\n", gfs->domain.global_y0);
-    fprintf(f, "    \"rank\": %d,\n", gfs->domain.rank);
-    fprintf(f, "    \"mpi_size\": %d,\n", gfs->domain.mpi_size);
-    fprintf(f, "    \"gs\": %d,\n", gfs->gs);
-    fprintf(f, "    \"lower_x_ghost\": %s,\n",
-            (gfs->domain.lower_x_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"upper_x_ghost\": %s,\n",
-            (gfs->domain.upper_x_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"lower_y_ghost\": %s,\n",
-            (gfs->domain.lower_y_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"upper_y_ghost\": %s,\n",
-            (gfs->domain.upper_y_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"data\": [ ");
-    for (int64_t j = 0; j < gfs->ny; j++)
-    {
-        const char *jend = (j != gfs->ny - 1) ? "," : "";
-        fprintf(f, "[\n");
-        for (int64_t i = 0; i < gfs->nx; i++)
-        {
-            const char *iend = (i != gfs->nx - 1) ? "," : "";
-            fprintf(f, "%20.16e%s", gfs->vars[var]->val[gf_indx_2d(gfs, i, j)], iend);
-        }
-        fprintf(f, "]%s", jend);
-    }
-    fprintf(f, "]\n}\n");
-    fclose(f);
+    snprintf(buf, buflen, "%s/rank_%d.h5", prefix, rank);
 }
 
-/******************************************************************
-* Purpose: Write the local patch of a 3D grid variable to a JSON file named
-*     "<vname>_rank_<rank>.json" (or "VAR_<var>_rank_<rank>.json" if the
-*     variable has no name). The JSON includes grid metadata (nx, ny, nz, dx,
-*     dy, dz, x0, y0, z0, local and global offsets, rank info, ghost presence
-*     flags) and the full local data array as a nested JSON array [nz][ny][nx].
-* Input Variables:
-*     gfs: struct ngfs_3d*, grid function container
-*     var: int, index of the variable to output
-* Output:
-*     A JSON file written to the current working directory.
-* Return Values and indicators of success / failure
-*     (none)
-*******************************************************************/
-void output_3d_gf(struct ngfs_3d *gfs, int var, const char *dir)
+/* Dataset name for variable `var` inside the per-rank HDF5 file.
+ * Prefers the gf's own vname (always set to "VarN" by gf_allocate) but
+ * falls back to "VAR_<var>" if that slot is somehow null. */
+static const char *dataset_name(const char *vname, int var, char *fallback,
+                                size_t fbuf_len)
 {
-    char fname[256];
-    const char *prefix = (dir && dir[0]) ? dir : ".";
-    if (gfs->vars[var]->vname)
-    {
-        snprintf(fname, sizeof(fname), "%s/%s_rank_%d.json",
-                 prefix, gfs->vars[var]->vname, gfs->domain.rank);
-    }
-    else
-    {
-        snprintf(fname, sizeof(fname), "%s/VAR_%d_rank_%d.json",
-                 prefix, var, gfs->domain.rank);
-    }
+    if (vname && vname[0]) return vname;
+    snprintf(fallback, fbuf_len, "VAR_%d", var);
+    return fallback;
+}
 
-    FILE *f = fopen(fname, "w");
-    if (!f)
+void output_2d_gf(struct ngfs_2d *gfs, int var, const char *dir)
+{
+    char filename[256];
+    char fallback[64];
+    build_rank_filename(filename, sizeof(filename), dir, gfs->domain.rank);
+    const char *dsname = dataset_name(gfs->vars[var]->vname, var,
+                                      fallback, sizeof(fallback));
+
+    /* HDF5 dataset dims are slowest-axis first: { ny, nx }. */
+    const size_t local_dim[2] = { (size_t)gfs->ny, (size_t)gfs->nx };
+
+    if (BinaryWriteArray_2d(filename, dsname, local_dim,
+                            gfs->vars[var]->val, gfs) != 0)
     {
-        fprintf(stderr, "rank %d: cannot open '%s' for writing: %s\n",
-                gfs->domain.rank, fname, strerror(errno));
+        fprintf(stderr, "rank %d: failed to write '%s' to '%s'\n",
+                gfs->domain.rank, dsname, filename);
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
-    fprintf(f, "{\n");
-    fprintf(f, "    \"nx\": %ld,\n", (long)gfs->nx);
-    fprintf(f, "    \"ny\": %ld,\n", (long)gfs->ny);
-    fprintf(f, "    \"nz\": %ld,\n", (long)gfs->nz);
-    fprintf(f, "    \"dx\": %20.16e,\n", gfs->dx);
-    fprintf(f, "    \"dy\": %20.16e,\n", gfs->dy);
-    fprintf(f, "    \"dz\": %20.16e,\n", gfs->dz);
-    fprintf(f, "    \"x0\": %20.16e,\n", gfs->x0);
-    fprintf(f, "    \"y0\": %20.16e,\n", gfs->y0);
-    fprintf(f, "    \"z0\": %20.16e,\n", gfs->z0);
-    fprintf(f, "    \"local_i0\": %ld,\n", (long)gfs->domain.local_i0);
-    fprintf(f, "    \"local_j0\": %ld,\n", (long)gfs->domain.local_j0);
-    fprintf(f, "    \"local_k0\": %ld,\n", (long)gfs->domain.local_k0);
-    fprintf(f, "    \"global_cells_x\": %ld,\n", (long)gfs->domain.global_nx_cells);
-    fprintf(f, "    \"global_cells_y\": %ld,\n", (long)gfs->domain.global_ny_cells);
-    fprintf(f, "    \"global_cells_z\": %ld,\n", (long)gfs->domain.global_nz_cells);
-    fprintf(f, "    \"global_x0\": %20.16e,\n", gfs->domain.global_x0);
-    fprintf(f, "    \"global_y0\": %20.16e,\n", gfs->domain.global_y0);
-    fprintf(f, "    \"global_z0\": %20.16e,\n", gfs->domain.global_z0);
-    fprintf(f, "    \"rank\": %d,\n", gfs->domain.rank);
-    fprintf(f, "    \"mpi_size\": %d,\n", gfs->domain.mpi_size);
-    fprintf(f, "    \"gs\": %d,\n", gfs->gs);
-    fprintf(f, "    \"lower_x_ghost\": %s,\n",
-            (gfs->domain.lower_x_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"upper_x_ghost\": %s,\n",
-            (gfs->domain.upper_x_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"lower_y_ghost\": %s,\n",
-            (gfs->domain.lower_y_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"upper_y_ghost\": %s,\n",
-            (gfs->domain.upper_y_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"lower_z_ghost\": %s,\n",
-            (gfs->domain.lower_z_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"upper_z_ghost\": %s,\n",
-            (gfs->domain.upper_z_rank != INVALID_RANK) ? "true" : "false");
-    fprintf(f, "    \"data\": [ ");
-    for (int64_t k = 0; k < gfs->nz; k++)
+}
+
+void output_3d_gf(struct ngfs_3d *gfs, int var, const char *dir)
+{
+    char filename[256];
+    char fallback[64];
+    build_rank_filename(filename, sizeof(filename), dir, gfs->domain.rank);
+    const char *dsname = dataset_name(gfs->vars[var]->vname, var,
+                                      fallback, sizeof(fallback));
+
+    /* HDF5 dataset dims are slowest-axis first: { nz, ny, nx }.
+     * The buffer is i-fastest (gf_indx_3d order); HDF5 reads it in
+     * row-major / C order so the dim list above places nz outermost. */
+    const size_t local_dim[3] = { (size_t)gfs->nz, (size_t)gfs->ny,
+                                  (size_t)gfs->nx };
+
+    if (BinaryWriteArray_3d(filename, dsname, local_dim,
+                            gfs->vars[var]->val, gfs) != 0)
     {
-        const char *kend = (k != gfs->nz - 1) ? "," : "";
-        fprintf(f, "[\n");
-        for (int64_t j = 0; j < gfs->ny; j++)
-        {
-            const char *jend = (j != gfs->ny - 1) ? "," : "";
-            fprintf(f, "[\n");
-            for (int64_t i = 0; i < gfs->nx; i++)
-            {
-                const char *iend = (i != gfs->nx - 1) ? "," : "";
-                fprintf(f, "%20.16e%s",
-                        gfs->vars[var]->val[gf_indx_3d(gfs, i, j, k)], iend);
-            }
-            fprintf(f, "]%s", jend);
-        }
-        fprintf(f, "]%s", kend);
+        fprintf(stderr, "rank %d: failed to write '%s' to '%s'\n",
+                gfs->domain.rank, dsname, filename);
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
-    fprintf(f, "]\n}\n");
-    fclose(f);
 }

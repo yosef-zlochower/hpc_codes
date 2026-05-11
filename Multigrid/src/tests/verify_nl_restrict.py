@@ -1,6 +1,7 @@
 import numpy as np
-import json
 import sys
+
+from h5read import load_rank
 
 ROUNDOFF_TOLERANCE = 1.0e-12
 
@@ -20,7 +21,8 @@ where h = dx_child / 2  (the parent fine-grid spacing).
 
 The 2D formula omits the Z factor.
 
-Only owned (non-ghost) child points are checked.
+Only owned (non-ghost) child points are checked.  Reads per-rank HDF5
+output (rank_<R>.h5).
 """
 
 
@@ -30,8 +32,7 @@ def _restrict1d(t, h2):
 
 
 def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
-    with open("Var0_rank_0.json") as f:
-        d0 = json.load(f)
+    d0 = load_rank(0)
 
     # JSON now stores cell counts; convert to grid-point counts for the
     # vertex-centred Dirichlet layout (points = cells + 1).
@@ -44,8 +45,7 @@ def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
     max_error = 0.0
 
     for rank in range(mpi_size):
-        with open(f"Var0_rank_{rank}.json") as f:
-            d = json.load(f)
+        d = load_rank(rank)
 
         nx = d["nx"]
         ny = d["ny"]
@@ -68,8 +68,8 @@ def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
         lower_z_ghost = d.get("lower_z_ghost", False)
         upper_z_ghost = d.get("upper_z_ghost", False)
 
-        local_data = np.array(d["data"])
-        if len(local_data.shape) == 2:
+        local_data = d["data"]
+        if local_data.ndim == 2:
             local_data = local_data.reshape((1,) + local_data.shape)
 
         # Parent (fine) grid spacing per axis: h = dx_child / 2

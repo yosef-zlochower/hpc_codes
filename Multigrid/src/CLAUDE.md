@@ -66,7 +66,20 @@ links against the C++ parser (`multigrid_parameters.cc`,
 runtime is pulled in. Tests use Python (`verify.py`,
 `verify_nl_prolong.py`, `verify_convergence.py`, etc.) to check
 correctness either by reconstructing the global field from per-rank
-JSON output or by parsing the driver's printed error.
+HDF5 output (via `h5read.load_rank`) or by parsing the driver's
+printed error.
+
+### Dependencies
+
+- **MPI** — required (the solver is parallel from the bottom up).
+- **HDF5** (serial C + High-Level helpers) — required for per-rank
+  output.  `find_package(HDF5 REQUIRED COMPONENTS C HL)` picks up the
+  standard system install: `dnf install hdf5-devel` on Fedora/RHEL,
+  `apt install libhdf5-dev` on Debian/Ubuntu.  No parallel HDF5 build
+  is needed; each rank writes its own file.
+- **Python 3** with `h5py` and `numpy` — required to run the test
+  suite's verifiers and `scripts/make_xdmf.py`.  `pip install h5py`
+  if your distro doesn't ship a package.
 
 ### Cleaning up
 
@@ -123,7 +136,7 @@ to other source terms and boundary conditions.
 
 5. **`multigrid.{c,h}`** — Multigrid hierarchy and V-cycle. `ngfs_3d_create_hierarchy` builds the coarse-grid chain via repeated halving. Transfer operators: `inject_var_3d` (injection), `restrict_var_3d` (full-weighting, 27-point stencil, weight 8/4/2/1 for centre/face/edge/corner), `prolong_var_3d` (trilinear interpolation, subtracts correction). `vcycle_3d` performs pre-smooth → defect → restrict → recurse → post-smooth → prolong.
 
-6. **`io.{c,h}`** — JSON output. Each rank writes `<vname>_rank_<rank>.json` with grid metadata and the local data array.
+6. **`io.{c,h}`** + **`HDF5BinaryWrite.{c,h}`** — Per-rank HDF5 output. `output_3d_gf(gfs, var, dir)` writes the variable as a dataset named `/<vname>` into `<dir>/rank_<R>.h5`; multiple calls from the same rank append additional datasets to the same file. The first call from a rank also writes a `/metadata` group with grid dimensions, spacings, origins, ghost-zone count, per-face Neumann flags, and per-face has-neighbour flags. The post-processing helper `scripts/make_xdmf.py` reads all `rank_*.h5` files in a directory and writes a `multigrid.xmf` sidecar that ParaView / VisIt / PyVista open directly as a single assembled grid (no data copying needed). The `xmf` file references the HDF5 datasets via HyperSlabs and includes the per-axis vertex coordinates, with special handling for the cell-centred layout: hybrid Dirichlet vertices are rendered at the physical boundary; pure-Neumann ghost slots are skipped.
 
 7. **`timer.{c,h}`** — Wall-clock timing utility.
 
@@ -148,9 +161,17 @@ decomposition, hierarchy creation, injection, restriction, prolongation)
 in both 2D and 3D. Test scripts invoke `mpirun --map-by :OVERSUBSCRIBE`
 so tests run on any machine regardless of core count. Most use Python
 verifiers (`verify.py`, `verify_zeros.py`, etc.) that reconstruct the
-global field from per-rank JSON files; the cell-centred operator tests
-(`test_restrict_cc_3d`, `test_prolong_cc_3d`) check pass/fail in C
-directly and don't need a Python helper.
+global field from per-rank HDF5 files via the `h5read.load_rank`
+helper; the cell-centred operator tests (`test_restrict_cc_3d`,
+`test_prolong_cc_3d`) check pass/fail in C directly and don't need a
+Python helper.
+
+`run_test_make_xdmf.sh` is a smoke test for `scripts/make_xdmf.py`:
+it runs the driver at np=2 (so the z-axis is split across ranks),
+invokes the XMF generator, validates that the resulting `.xmf` is
+well-formed XML, that every referenced HDF5 dataset exists, and that
+the per-rank slabs assemble into a global grid with the expected
+vertex count (after de-duplicating the shared boundary points).
 
 In addition to the operator-level tests, `run_test_convergence.sh` runs
 the full driver against an auto-generated TOML at three grid resolutions

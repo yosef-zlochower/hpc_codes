@@ -1,6 +1,7 @@
 import numpy as np
-import json
 import sys
+
+from h5read import load_rank
 
 ROUNDOFF_TOLERANCE = 1.0e-12
 
@@ -27,7 +28,8 @@ global_kp) and coordinates (x, y, z):
       P[F] = (gx - dx*h^2) * (gy - dy*h^2) * (gz - dz*h^2)   [3D]
       P[F] = (gx - dx*h^2) * (gy - dy*h^2)                    [2D]
 
-Only owned (non-ghost) parent points are checked.
+Only owned (non-ghost) parent points are checked.  Reads per-rank HDF5
+output (rank_<R>.h5).
 """
 
 
@@ -38,8 +40,7 @@ def _prolong1d(t, delta, h2):
 
 
 def verify_nl_prolong(tol=ROUNDOFF_TOLERANCE):
-    with open("Var0_rank_0.json") as f:
-        d0 = json.load(f)
+    d0 = load_rank(0)
 
     mpi_size = d0["mpi_size"]
     is_3d = "nz" in d0
@@ -47,8 +48,7 @@ def verify_nl_prolong(tol=ROUNDOFF_TOLERANCE):
     max_error = 0.0
 
     for rank in range(mpi_size):
-        with open(f"Var0_rank_{rank}.json") as f:
-            d = json.load(f)
+        d = load_rank(rank)
 
         nx = d["nx"]
         ny = d["ny"]
@@ -76,8 +76,8 @@ def verify_nl_prolong(tol=ROUNDOFF_TOLERANCE):
         lower_z_ghost = d.get("lower_z_ghost", False)
         upper_z_ghost = d.get("upper_z_ghost", False)
 
-        local_data = np.array(d["data"])
-        if len(local_data.shape) == 2:
+        local_data = d["data"]
+        if local_data.ndim == 2:
             local_data = local_data.reshape((1,) + local_data.shape)
 
         # Fine grid spacing squared per axis

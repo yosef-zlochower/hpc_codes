@@ -14,7 +14,7 @@ run_verify()
 {
     python verify_nl_prolong.py
     check
-    rm -f Var0_rank_*.json
+    rm -f rank_*.h5
 }
 
 echo "=== 2D nonlinear prolongation tests ==="

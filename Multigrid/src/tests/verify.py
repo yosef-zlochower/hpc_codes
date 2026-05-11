@@ -1,16 +1,23 @@
 import numpy as np
-import json
 import sys
+
+from h5read import load_rank
 
 
 ROUNDOFF_TOLERANCE = 1.0e-12
 
 """
-Verify domain decomposition and syncing tests for both 2d and 3d cases. 2d cases are mapped to 3d grids
-  data[j,i] ->   data[0,j,i].
+Verify domain decomposition and syncing tests for both 2d and 3d cases. 2d
+cases are mapped to 3d grids
+  data[j,i] -> data[0,j,i].
   Note that the data are stored in fortran order.
 
-Ghost metadata fields (added to JSON output from test programs):
+Reads per-rank HDF5 output (rank_<R>.h5) written by output_*_gf.  Each
+file contains a /metadata group with grid attributes and one or more
+/<vname> datasets; load_rank returns those in a dict whose keys mirror
+the legacy JSON field names.
+
+Ghost metadata fields:
   gs            : ghost zone width (integer)
   lower_x_ghost : true if this rank has an MPI neighbor on the lower-x face
   upper_x_ghost : true if this rank has an MPI neighbor on the upper-x face
@@ -18,14 +25,11 @@ Ghost metadata fields (added to JSON output from test programs):
   upper_y_ghost : true if this rank has an MPI neighbor on the upper-y face
   lower_z_ghost : true if this rank has an MPI neighbor on the lower-z face (3D only)
   upper_z_ghost : true if this rank has an MPI neighbor on the upper-z face (3D only)
-
-If ghost metadata is absent (old-style JSON), all data is treated as owned.
 """
 
 
 def verify_domain_and_sync(tol=ROUNDOFF_TOLERANCE):
-    with open("Var0_rank_0.json", "r") as f:
-        d = json.load(f)
+    d = load_rank(0)
 
     # JSON now stores cell counts; convert to grid-point counts for the
     # vertex-centred Dirichlet layout (points = cells + 1).
@@ -44,8 +48,7 @@ def verify_domain_and_sync(tol=ROUNDOFF_TOLERANCE):
     max_error = -np.inf
 
     for rank in range(mpi_size):
-        with open(f"Var0_rank_{rank}.json", "r") as f:
-            d = json.load(f)
+        d = load_rank(rank)
 
         nz = d.get('nz', 1)  # in 2d case, set nz=1
         ny = d['ny']
@@ -70,8 +73,8 @@ def verify_domain_and_sync(tol=ROUNDOFF_TOLERANCE):
         lower_z_ghost = d.get("lower_z_ghost", False)
         upper_z_ghost = d.get("upper_z_ghost", False)
 
-        local_data = np.array(d["data"])
-        if len(local_data.shape) == 2:
+        local_data = d["data"]
+        if local_data.ndim == 2:
             local_data = local_data.reshape((1,) + local_data.shape)
 
         # Build coordinate arrays for ALL local points (including ghost zones)

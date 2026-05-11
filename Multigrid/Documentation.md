@@ -86,7 +86,7 @@ The two post-smoothing passes are deliberate. The SOR pass with the user-supplie
 4. If `multigrid = true`, build the hierarchy.
 5. Initialise `VAR_RHS = -3π² sin(πx) sin(πy) sin(πz)` and `VAR_SOL = 0` (with BCs applied).
 6. Outer loop, up to `n_iters`: either one `vcycle_3d` or one `gauss_seidel_3d + calc_defect_3d`, breaking when the defect falls below `tol`.
-7. Compute the max-norm error against `u_exact`, print, and write per-rank JSON via `output_3d_gf`.
+7. Compute the max-norm error against `u_exact`, print, and write per-rank HDF5 via `output_3d_gf` (one `rank_<R>.h5` per rank, with `/metadata` attributes and a `/Var0` dataset).  Run `scripts/make_xdmf.py` against the output directory to emit a `multigrid.xmf` sidecar that ParaView / VisIt open directly.
 
 ## 8. User-settable parameters (TOML)
 
@@ -171,6 +171,12 @@ The cleanest refactor for extension would be to split `driver_multigrid.c` into 
 
 ## 10. Building and running
 
+### Dependencies
+
+- **MPI** (any standards-conforming implementation) — `find_package(MPI REQUIRED COMPONENTS C CXX)`.
+- **HDF5** with the C and High-Level interfaces — `find_package(HDF5 REQUIRED COMPONENTS C HL)`. *Serial* HDF5 is sufficient; each rank writes its own file, so no parallel-HDF5 build is needed. On Fedora/RHEL `dnf install hdf5-devel`; on Debian/Ubuntu `apt install libhdf5-dev`.
+- **Python 3** with `numpy` and `h5py` — required to run the test suite's verifiers and the `scripts/make_xdmf.py` post-processor. `pip install h5py` if your distro doesn't ship a package.
+
 The build is CMake-driven and out-of-tree — every artefact lands under the chosen build directory and never in `src/`. The top-level `CMakeLists.txt` lives in the project root and pulls in `src/` via `add_subdirectory`, so all commands run from the project root.
 
 ### Production build (default)
@@ -235,3 +241,31 @@ Cleaning:
 cmake --build build --target clean   # remove generated objects/binaries
 rm -rf build                         # full reset
 ```
+
+### Output and visualisation
+
+Each rank writes a single HDF5 file `rank_<R>.h5` into the directory
+named by `[output] dir` in the TOML (defaults to cwd).  The file
+contains:
+
+- `/metadata` — group with grid dimensions, spacings, origins,
+  per-face Neumann flags, per-face has-neighbour flags, and the
+  rank's offset within the global index space.
+- `/Var0`, `/Var1`, ... — one 3D dataset per variable that was
+  passed to `output_3d_gf`.  By default the driver writes just
+  `Var0` (the solution `u`).
+
+To open the run in ParaView or VisIt, run the XDMF generator
+against the output directory:
+
+```bash
+python3 scripts/make_xdmf.py --dir <output_dir>
+paraview <output_dir>/multigrid.xmf
+```
+
+`make_xdmf.py` walks every `rank_*.h5`, builds a per-rank
+`Uniform` sub-grid with explicit vertex coordinates, and writes a
+`Collection` of those sub-grids.  Hybrid Dirichlet vertex slots
+are rendered at the physical boundary location; pure-Neumann ghost
+slots are skipped.  Adjacent ranks share exactly one point at each
+internal MPI interface (no visual gap).

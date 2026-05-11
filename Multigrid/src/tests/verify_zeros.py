@@ -1,6 +1,7 @@
 import numpy as np
-import json
 import sys
+
+from h5read import load_rank
 
 ROUNDOFF_TOLERANCE = 1.0e-12
 
@@ -17,19 +18,19 @@ For each owned (non-ghost) point, the check is:
     (global_ix == 0 or gni-1, global_jy == 0 or gnj-1,
      3D: global_kz == 0 or gnk-1): skip
   - Otherwise: |value| must be < tol
+
+Reads per-rank HDF5 output (rank_<R>.h5).
 """
 
 
 def verify_zeros(tol=ROUNDOFF_TOLERANCE):
-    with open("Var0_rank_0.json", "r") as f:
-        d0 = json.load(f)
+    d0 = load_rank(0)
     mpi_size = d0["mpi_size"]
 
     max_error = 0.0
 
     for rank in range(mpi_size):
-        with open(f"Var0_rank_{rank}.json", "r") as f:
-            d = json.load(f)
+        d = load_rank(rank)
 
         is_3d = "nz" in d
         nz = d.get("nz", 1)
@@ -54,8 +55,8 @@ def verify_zeros(tol=ROUNDOFF_TOLERANCE):
         lower_z_ghost = d.get("lower_z_ghost", False)
         upper_z_ghost = d.get("upper_z_ghost", False)
 
-        local_data = np.array(d["data"])
-        if len(local_data.shape) == 2:
+        local_data = d["data"]
+        if local_data.ndim == 2:
             local_data = local_data.reshape((1,) + local_data.shape)
 
         # Owned (non-ghost) index ranges

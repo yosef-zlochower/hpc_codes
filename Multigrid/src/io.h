@@ -3,12 +3,15 @@
 #include "gf.h"
 
 /******************************************************************
-* Purpose: Write the local patch of a 2D grid variable to a JSON file
-*     named "<dir>/<vname>_rank_<rank>.json" (or "<dir>/VAR_<var>_rank_<rank>.json"
-*     if the variable has no name).  The JSON includes grid metadata
-*     (nx, ny, dx, dy, x0, y0, local and global offsets, rank info,
-*     ghost presence flags) and the full local data array as a nested
-*     JSON array [ny][nx].
+* Purpose: Append the local patch of a 2D grid variable as an HDF5
+*     dataset to this rank's output file `<dir>/rank_<R>.h5`.
+*     The dataset name is the variable's vname slot (always "VarN"
+*     for variables allocated through ngfs_2d_allocate; falls back
+*     to "VAR_<var>" if vname is null).  The first call from a given
+*     rank also writes a `/metadata` group with grid dims, spacings,
+*     origins, ghost-zone count, per-face Neumann flags, and per-face
+*     has-neighbour flags; subsequent calls reuse the existing
+*     metadata and just append their dataset under `/`.
 * Input Variables:
 *     gfs: struct ngfs_2d*, grid function container
 *     var: int, index of the variable to output
@@ -16,26 +19,27 @@
 *         The caller is responsible for ensuring the directory exists
 *         (e.g. by calling mkdir on rank 0 followed by MPI_Barrier).
 * Output:
-*     A JSON file written under the chosen directory.
+*     A per-rank HDF5 file under the chosen directory; aborts on any
+*     HDF5 error via MPI_Abort.
 * Return Values and indicators of success / failure
 *     (none)
 *******************************************************************/
 void output_2d_gf(struct ngfs_2d *gfs, int var, const char *dir);
 
 /******************************************************************
-* Purpose: Write the local patch of a 3D grid variable to a JSON file
-*     named "<dir>/<vname>_rank_<rank>.json" (or "<dir>/VAR_<var>_rank_<rank>.json"
-*     if the variable has no name).  The JSON includes grid metadata
-*     (nx, ny, nz, dx, dy, dz, x0, y0, z0, local and global offsets,
-*     rank info, ghost presence flags) and the full local data array
-*     as a nested JSON array [nz][ny][nx].
+* Purpose: 3D variant of output_2d_gf -- writes the variable as a 3D
+*     dataset to `<dir>/rank_<R>.h5` with dims `{ nz, ny, nx }`
+*     (slowest axis first).  Buffer layout is i-fastest (matches
+*     gf_indx_3d).  See output_2d_gf for the full description of the
+*     per-rank file layout and metadata fields.
 * Input Variables:
 *     gfs: struct ngfs_3d*, grid function container
 *     var: int, index of the variable to output
 *     dir: const char*, output directory path; NULL or "" means cwd.
 *         The caller is responsible for ensuring the directory exists.
 * Output:
-*     A JSON file written under the chosen directory.
+*     A per-rank HDF5 file under the chosen directory; aborts on any
+*     HDF5 error via MPI_Abort.
 * Return Values and indicators of success / failure
 *     (none)
 *******************************************************************/

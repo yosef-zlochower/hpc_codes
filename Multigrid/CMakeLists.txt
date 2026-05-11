@@ -97,6 +97,18 @@ endif()
 find_package(MPI REQUIRED COMPONENTS C CXX)
 
 # -----------------------------------------------------------------------------
+# HDF5 (per-rank output via the serial C interface + High-Level helpers)
+# -----------------------------------------------------------------------------
+
+# Each rank writes its own rank_<R>.h5 file (no parallel HDF5 dependency;
+# the serial library is enough because there is no shared-file I/O).  The
+# post-processing script scripts/make_xdmf.py stitches the per-rank files
+# into a single XDMF view that ParaView / VisIt open directly.
+find_package(HDF5 REQUIRED COMPONENTS C HL)
+message(STATUS "HDF5 version        = ${HDF5_VERSION}")
+message(STATUS "HDF5 include dirs   = ${HDF5_INCLUDE_DIRS}")
+
+# -----------------------------------------------------------------------------
 # CTest hookup (must be at the top level so add_test() in subdirectories
 # is registered)
 # -----------------------------------------------------------------------------

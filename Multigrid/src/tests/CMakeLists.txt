@@ -49,6 +49,7 @@ set(TEST_SCRIPTS
     run_test_prolong_cc.sh
     run_test_parser.sh
     run_test_convergence.sh
+    run_test_make_xdmf.sh
 )
 
 # Manufactured-solution presets used by the convergence test.  One
@@ -85,6 +86,7 @@ set(VERIFY_SCRIPTS
     verify_nl_prolong.py
     verify_convergence.py
     check.py
+    h5read.py
 )
 
 foreach(f IN LISTS TEST_SCRIPTS VERIFY_SCRIPTS)
@@ -107,7 +109,7 @@ set(_CTEST_LABELS_E2E  "end_to_end")
 # the operator-level suites or only the end-to-end checks if they want.
 # run_test_convergence.sh is fanned out to multiple CTest entries (one
 # per preset) below, so it is excluded from the generic loop here.
-set(_e2e_scripts run_test_parser.sh)
+set(_e2e_scripts run_test_parser.sh run_test_make_xdmf.sh)
 
 foreach(script IN LISTS TEST_SCRIPTS)
     if(script STREQUAL "run_test_convergence.sh")

@@ -469,7 +469,16 @@ The code is layered.  From bottom to top:
   (\texttt{inject\_var\_3d}, \texttt{restrict\_var\_3d},
   \texttt{prolong\_var\_3d}), and the V-cycle driver
   \texttt{vcycle\_3d}.
-\item[\texttt{io.\{c,h\}}] Per-rank JSON output.
+\item[\texttt{io.\{c,h\}} and \texttt{HDF5BinaryWrite.\{c,h\}}]
+  Per-rank HDF5 output.  Each rank writes
+  \texttt{<dir>/rank\_<R>.h5}; metadata (dimensions, spacings,
+  origins, per-face Neumann flags, has-neighbour flags) lives in a
+  \texttt{/metadata} group, and each variable appears as a 3D dataset
+  named \texttt{/<vname>}.  Multiple calls from the same rank append
+  more datasets to the same file.  The post-processing helper
+  \texttt{scripts/make\_xdmf.py} reads every \texttt{rank\_*.h5} in
+  a run directory and writes a \texttt{multigrid.xmf} sidecar that
+  ParaView/VisIt open directly as a single assembled grid.
 \item[\texttt{parameter.\{cc,h\}} and \texttt{toml.hpp}] TOML parameter
   parsing.  \texttt{parameter.cc} is C++; the
   \texttt{parse\_parameter\_file} entry point is exposed as
@@ -477,7 +486,7 @@ The code is layered.  From bottom to top:
 \item[\texttt{driver\_multigrid.c}] The top-level program: parameter
   parsing, grid set-up, RHS initialisation from
   \eqref{eq:manufactured}, the outer iteration loop, error reporting,
-  and JSON output.
+  and HDF5 output.
 \end{description}
 A small set of variable indices is fixed in \texttt{gauss\_seidel.h}:
 \texttt{VAR\_SOL = 0} (the solution $u$),
@@ -666,7 +675,10 @@ defect computation; the loop terminates early if
 $\norm{d}_{\Linf} < \texttt{tol}$.  After convergence the driver
 computes $\norm{u_h - u_\star}_{\Linf}$ on the local interior, reduces
 across ranks with \texttt{MPI\_MAX}, and prints the result.  Per-rank
-JSON output is written by \texttt{output\_3d\_gf}.
+HDF5 output is written by \texttt{output\_3d\_gf}, producing one
+\texttt{rank\_<R>.h5} per process; the helper
+\texttt{scripts/make\_xdmf.py} then writes a \texttt{multigrid.xmf}
+sidecar that ParaView/VisIt open as a single assembled view.
 
 % =============================================================================
 \section{Building and running the code}\label{sec:build}
@@ -678,6 +690,22 @@ library, executable, and test artefact lands under a user-chosen
 top-level \texttt{CMakeLists.txt} lives in the project root and pulls
 in \texttt{src/} via \verb|add_subdirectory|, so the typical commands
 are run from the project root.
+
+\subsection{Dependencies}\label{sec:build-deps}
+\begin{description}[leftmargin=2em,style=nextline]
+\item[MPI] Any standards-conforming implementation.  CMake locates the
+  C and C++ wrappers via \verb|find_package(MPI REQUIRED COMPONENTS C CXX)|.
+\item[HDF5] Required for per-rank output, located via
+  \verb|find_package(HDF5 REQUIRED COMPONENTS C HL)|.  The \emph{serial}
+  C library plus its High-Level helpers is sufficient -- each rank
+  writes its own file, so a parallel-HDF5 build is not required.  On
+  Fedora/RHEL install \texttt{hdf5-devel}; on Debian/Ubuntu install
+  \texttt{libhdf5-dev}.
+\item[Python 3 + h5py + numpy] Required by the test suite's verifiers
+  and by \texttt{scripts/make\_xdmf.py}, which generates the XDMF
+  sidecar that ParaView/VisIt use to open the per-rank output as a
+  single assembled grid.
+\end{description}
 
 \subsection{Two build modes}\label{sec:build-modes}
 The configuration is governed by two options.  The first selects what
@@ -1018,7 +1046,7 @@ min_cells = 4
 name = "my_mixed_problem"
 
 [output]
-dir = "out_run_001"  # optional; per-rank JSON written here, mkdir -p'd by rank 0
+dir = "out_run_001"  # optional; per-rank HDF5 (rank_<R>.h5) written here, mkdir -p'd by rank 0
 \end{lstlisting}
 \begin{lstlisting}[language=bash]
 mpirun -np 4 build/src/driver_multigrid my_run.toml
