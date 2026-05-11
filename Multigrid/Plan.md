@@ -34,44 +34,40 @@ items above were tackled.
 Severity-ordered.  Tags: **doc**, **decision**, **robustness**,
 **ergonomics**, **extension**.
 
-### Known limitations after CellCentred Phases 2--5
+### Known limitations after CellCentred Phases 2--7
 
-* **Boundary-cell stencil order at hybrid Dirichlet vertices.**  Two
-  presets are registered in `problem_registry.c` but **excluded**
-  from the CTest convergence loop:
-  `manufactured_neumann_inhomog` (all-Neumann inhomogeneous) and
-  `manufactured_mixed_inhomog` (D-N hybrid axes with $u_v \neq 0$ at
-  the Dirichlet vertex).  Both have the same root cause: the simple
-  cell-centred boundary stencil
-  $u_{\text{ghost}} = u_{\text{int}} + h\,q$ (Neumann mirror) or the
-  3-point non-uniform formula
-  $(2 u_v - 3 u + u_{\text{far}})/h^2$ (hybrid Dirichlet vertex) has
-  only $\mathcal{O}(h)$ local truncation when the exact solution has
-  non-zero higher derivatives at the boundary.  This propagates to
-  global rate $\sim 1.5$ on the inhomogeneous presets.
+* **`manufactured_neumann_inhomog` excluded from CTest.**  This
+  is the singular all-Neumann inhomogeneous preset
+  ($u = \sin(\pi x/2) \sin(\pi y/2) \sin(\pi z/2)$, with non-zero
+  $\partial_n u$ on the three lower faces).  The V-cycle's defect
+  plateaus at $\sim 10^{-2}$ instead of driving to $10^{-9}$:
+  the singular system's constant null space is repeatedly
+  re-injected by the V-cycle and immediately stripped by the
+  per-iteration mean-zero projection, so the defect oscillates
+  around a non-zero stationary value.  This caps the empirical
+  rate at the finest pair to $\sim 1.7$ at `min_cells = 2` or
+  $\sim 1.88$ at `min_cells = 4` -- both below the test's
+  $[1.8, 2.3]$ threshold (the latter is borderline-passing but
+  not consistently so).
 
-  Phase 5 attempted the 4-point higher-order extrapolation
-  $u_{\text{ghost}} = (21/23) u_1 + (3/23) u_2 - (1/23) u_3 + (24/23) h\,q$
-  (and the analogous 4-point Lagrange form at hybrid Dirichlet
-  vertices).  Both formulas give $\mathcal{O}(h^2)$ Laplacian
-  truncation locally and *should* restore rate 2, but in practice
-  they did not improve convergence: the 4-point Neumann ghost has
-  d-coefficient $24/23$ in front of $h q$, which means the discrete
-  compatibility becomes $\sum f = (24/23) \sum q/h$ instead of
-  matching the continuous $\sum f = \sum q/h$.  The 4.3% mismatch
-  shows up as a constant-mode imbalance of size $\mathcal{O}(\sum
-  q/h)/N^3$ that the V-cycle cannot drive to zero.  The 4-point
-  Lagrange formula at hybrid D vertices gave bit-identical
-  solutions to the 3-point form (likely because the cc trilinear
-  prolongation's geometric error at hybrid boundary cells dominates
-  the V-cycle behaviour, masking the smoother improvement).  The
-  Phase 5 4-point boundary code was reverted; the simpler (and
-  empirically slightly better) Phase 3/4 formulas are back.
+  The discretisation itself is rate-2 (consistent with the other
+  Neumann-bearing presets that do pass).  The missing rate is on
+  the iterative side -- a Krylov-accelerated coarse solve or an
+  explicit null-space-orthogonal V-cycle iteration would close
+  the gap.  Deferred.
 
-  A genuine fix likely requires (a) a boundary stencil whose
-  d-coefficient stays at exactly 1 to preserve compatibility, and
-  (b) a cc prolongation that uses correct geometric weights at
-  hybrid boundary cells.  Both deferred.
+* **`run_test_convergence.sh` uses `min_cells = 2` (was 4).**
+  At np=8, the auto-topology decomposes the global grid into
+  $2 \times 2 \times 2$ per-rank tiles, so $N = 32$ leaves each
+  rank with only 16 cells/dir.  `min_cells = 4` caps the
+  hierarchy at 3 levels (coarsest $4 \times 4 \times 4$
+  per rank), at which point the V-cycle plateaus at a defect
+  reduction factor of $\sim 0.8$ per cycle.  `min_cells = 2`
+  unlocks 5+ levels on the same $N$ and recovers the
+  $h$-independent convergence rate that the discretisation
+  permits.  All currently-active presets (including the
+  re-enabled `manufactured_mixed_inhomog`) pass at both np=1 and
+  np=8 with `min_cells = 2`.
 
 * **SOR retuning (Phase 5, landed).**  The convergence tests now
   use $\omega = 1.5$, $n_{\text{smooth}} = 2$, $n_{\text{iters}} = 40$
@@ -161,19 +157,49 @@ The 4-point Neumann ghost code was reverted on every face;
 `apply_bc_3d` is back to $u_{\text{ghost}} = u_{\text{int}} + h q$
 on every Neumann boundary.
 
-## Phase 7 plan: deferred correction for rate-2 Neumann boundaries
+## Phase 7 (deferred correction): investigated, abandoned
 
-The two excluded CTest presets
-(`manufactured_neumann_inhomog`, `manufactured_mixed_inhomog`)
-both fail because the simple cell-centred Neumann mirror
-$u_{\text{ghost}} = u_{\text{int}} + h\,q$ has $\mathcal{O}(h^3)$
-ghost truncation, which becomes $\mathcal{O}(h)$ Laplacian
-truncation at the boundary cell when $u'''(\text{boundary})
-\neq 0$.  Phase 6.2B's 4-point higher-order ghost addresses the
-truncation order but breaks the M-matrix property and SOR
-diverges.  This plan keeps the M-matrix-preserving simple ghost
-and recovers rate-2 accuracy via a separate **defect-correction
-solve** stacked on top of the existing V-cycle.
+A deferred-correction "Phase B" stage was prototyped to attack
+what looked like an $\mathcal{O}(h)$ Neumann-boundary truncation
+on `manufactured_neumann_inhomog` and `manufactured_mixed_inhomog`.
+The infrastructure (`boundary_truncation_3d` helper, an operator
+test, the driver-level Phase A/B split) all worked as designed:
+the helper computed $\tau_h$ exactly on a cubic test, the V-cycle
+solved $A\,v = \tau_h$ to $10^{-13}$, and the magnitudes of $v$
+were consistent with the local-truncation prediction.
+
+But on `manufactured_mixed_inhomog` the correction did *not* move
+the reported $L_\infty$ error: $|v|_\infty \approx 8 \times
+10^{-4}$ while the metric reported $|u_h - u_{\text{exact}}|_\infty
+= 0.118$.  Tracking this back, the 0.118 was at cell
+$(i, j, k) = (32, 32, 0)$ on a $34^3$ array -- a corner slot
+where (i, j) sit on the upper-x and upper-y interior edges and
+$k = 0$ is the hybrid-D vertex on z, whose stored value (set by
+`apply_bc` at $z = 0$) disagrees with what the metric evaluated
+at the formula coordinate $z = -h/2$.  The "rate-1" reading was
+an **`owned_bounds_3d` artefact**, not a discretisation issue.
+The 4-point Lagrange formula at hybrid D-vertex cells (Phase 6.2)
+and the simple Neumann ghost both genuinely give the $L_\infty$
+rate that asymptotic theory predicts (rate 2 for smooth
+solutions; the $\mathcal{O}(h)$ ghost truncation is absorbed by
+the discrete Green's function).
+
+With `owned_bounds_3d` corrected to skip endpoint slots on any
+axis with at least one Neumann face, single-rank runs of both
+excluded presets show clean rate-2 convergence on the finest
+pair, **without** any deferred-correction infrastructure.
+Phase 7's helper, operator test, and driver Phase B were
+removed; the simple solver is sufficient on np=1.
+
+The remaining blocker for re-enabling the two presets is the
+parallel V-cycle bug documented under "Known limitations"
+above, not the discretisation order.
+
+## Reference: original Phase 7 sketch (kept for context)
+
+The original Phase 7 plan, before the metric artefact was
+identified, follows.  Useful only as background; the helper and
+infrastructure it describes have been removed.
 
 ### 7.1 Why a stencil-only fix is impossible
 

@@ -23,7 +23,6 @@ set(TEST_BINS
     test_restrict_nl_2d test_restrict_nl_3d
     test_prolong_nl_2d  test_prolong_nl_3d
     test_restrict_cc_3d test_prolong_cc_3d
-    test_deferred_correction_3d
 )
 
 foreach(name IN LISTS TEST_BINS)
@@ -48,7 +47,6 @@ set(TEST_SCRIPTS
     run_test_prolong_nl.sh
     run_test_restrict_cc.sh
     run_test_prolong_cc.sh
-    run_test_deferred_correction.sh
     run_test_parser.sh
     run_test_convergence.sh
 )
@@ -63,29 +61,22 @@ set(CONVERGENCE_PRESETS
     manufactured_dirichlet_inhomog
     manufactured_neumann_homog
     manufactured_mixed
+    manufactured_mixed_inhomog
 )
-# manufactured_neumann_inhomog and manufactured_mixed_inhomog are both
-# registered in problem_registry.c but excluded from CTest under the
-# CellCentred Phase 2/3 layout.  The simple boundary-cell stencils
-# both have O(h) local truncation that propagates to global rate 1
-# when the exact solution has non-zero higher derivatives at the
-# Dirichlet boundary:
-#
-# * manufactured_neumann_inhomog (Phase 2): cell-centred ghost mirror
-#   u_ghost = u_int + h*q has O(h^3) ghost truncation -> O(h)
-#   Laplacian at boundary.  For the homog preset (u = cos(pi x)...)
-#   u'''(0) = 0 by symmetry, rate is 2; for the inhomog preset
-#   (u = sin(pi x/2)...) rate drifts toward 1.5 at h=1/128.
-# * manufactured_mixed_inhomog (Phase 3): the 3-point non-uniform
-#   formula at the cell adjacent to a hybrid Dirichlet vertex has
-#   O(h) truncation.  The companion preset manufactured_mixed (homog
-#   Dirichlet at the D end) gives clean rate 2 because u_v = 0 makes
-#   the 3-point formula degenerate to a uniform stencil.
-#
-# CellCentred_plan.md Sec 4.2 specifies the 4-point higher-order
-# ghost formula that fixes both: O(h^2) at the boundary -> rate 2
-# globally.  That's scheduled for Phase 5 (smoother retuning +
-# boundary stencil upgrade); both excluded presets re-enable then.
+# manufactured_neumann_inhomog remains excluded from the convergence
+# loop.  Diagnosis: this is the only preset where the V-cycle's
+# defect plateaus at ~1e-2 instead of driving to ~1e-9 -- the
+# singular all-Neumann system has the constant in its null space,
+# and the V-cycle keeps injecting a constant-mode component that the
+# per-iteration mean-zero projection then immediately removes, so the
+# defect oscillates around a non-zero stationary value.  This caps
+# the achievable empirical rate around 1.7-1.88 depending on
+# min_cells, just under the test's [1.8, 2.3] threshold.  The
+# discretisation itself is rate-2 (consistent with the other
+# Neumann-bearing presets); the missing rate is on the iterative
+# side.  Fix would be a Krylov-accelerated coarse solve or explicit
+# null-space projection inside the V-cycle, not a discretisation
+# change.
 
 set(VERIFY_SCRIPTS
     verify.py

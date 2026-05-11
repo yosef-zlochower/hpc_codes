@@ -68,7 +68,15 @@ n_smooth  = 2
 n_iters   = 40
 tol       = 1.0e-12
 subcycles = 1
-min_cells = 4
+# min_cells = 2 (not 4): at np=8 the auto topology decomposes the
+# global grid into 2x2x2 per-rank tiles, so for N=32 each rank starts
+# with only 16 cells/dir.  min_cells=4 caps the hierarchy at 3 levels
+# (coarsest 4 cells/dir per rank = 8 cells/dir globally), which leaves
+# the smooth-mode error under-resolved and the V-cycle plateaus at a
+# defect reduction factor of ~0.8 per cycle.  min_cells=2 lets the
+# hierarchy go 5+ levels deep on the same N and recovers the
+# h-independent convergence rate the convergence test expects.
+min_cells = 2
 
 [problem]
 name = "${PRESET}"

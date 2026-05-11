@@ -33,25 +33,38 @@ static inline void owned_bounds_3d(const struct ngfs_3d *gfs,
                                    int64_t *j_lo, int64_t *j_hi,
                                    int64_t *k_lo, int64_t *k_hi)
 {
-    const bool x_cc = gfs->domain.neumann_lower_x && gfs->domain.neumann_upper_x;
-    const bool y_cc = gfs->domain.neumann_lower_y && gfs->domain.neumann_upper_y;
-    const bool z_cc = gfs->domain.neumann_lower_z && gfs->domain.neumann_upper_z;
+    /* Per-face: skip the endpoint slot whenever the axis has *any*
+     * Neumann face (i.e. is cell-centred or hybrid).  In that layout
+     * the coordinate from the standard formula x = x0 + i*dx points
+     * to either a Neumann ghost (h/2 outside the domain) or, for the
+     * D end of a hybrid axis, h/2 *off* the actual D-vertex location
+     * -- in both cases u_exact at the formula coord disagrees with
+     * the value stored by apply_bc, contaminating the L_inf metric
+     * with an artefact unrelated to the discretisation.  Pure D-D
+     * axes have no such offset and the endpoint slots hold the
+     * exact boundary value at the formula coord, so they're kept. */
+    const bool x_has_n = gfs->domain.neumann_lower_x || gfs->domain.neumann_upper_x;
+    const bool y_has_n = gfs->domain.neumann_lower_y || gfs->domain.neumann_upper_y;
+    const bool z_has_n = gfs->domain.neumann_lower_z || gfs->domain.neumann_upper_z;
 
-    *i_lo = (gfs->domain.lower_x_rank == INVALID_RANK) ? (x_cc ? 1 : 0)
-                                                       : gfs->gs;
-    *i_hi = (gfs->domain.upper_x_rank == INVALID_RANK) ? (x_cc ? gfs->nx - 1
-                                                              : gfs->nx)
-                                                       : gfs->nx - gfs->gs;
-    *j_lo = (gfs->domain.lower_y_rank == INVALID_RANK) ? (y_cc ? 1 : 0)
-                                                       : gfs->gs;
-    *j_hi = (gfs->domain.upper_y_rank == INVALID_RANK) ? (y_cc ? gfs->ny - 1
-                                                              : gfs->ny)
-                                                       : gfs->ny - gfs->gs;
-    *k_lo = (gfs->domain.lower_z_rank == INVALID_RANK) ? (z_cc ? 1 : 0)
-                                                       : gfs->gs;
-    *k_hi = (gfs->domain.upper_z_rank == INVALID_RANK) ? (z_cc ? gfs->nz - 1
-                                                              : gfs->nz)
-                                                       : gfs->nz - gfs->gs;
+    *i_lo = (gfs->domain.lower_x_rank == INVALID_RANK)
+                ? (x_has_n ? 1 : 0)
+                : gfs->gs;
+    *i_hi = (gfs->domain.upper_x_rank == INVALID_RANK)
+                ? (x_has_n ? gfs->nx - 1 : gfs->nx)
+                : gfs->nx - gfs->gs;
+    *j_lo = (gfs->domain.lower_y_rank == INVALID_RANK)
+                ? (y_has_n ? 1 : 0)
+                : gfs->gs;
+    *j_hi = (gfs->domain.upper_y_rank == INVALID_RANK)
+                ? (y_has_n ? gfs->ny - 1 : gfs->ny)
+                : gfs->ny - gfs->gs;
+    *k_lo = (gfs->domain.lower_z_rank == INVALID_RANK)
+                ? (z_has_n ? 1 : 0)
+                : gfs->gs;
+    *k_hi = (gfs->domain.upper_z_rank == INVALID_RANK)
+                ? (z_has_n ? gfs->nz - 1 : gfs->nz)
+                : gfs->nz - gfs->gs;
 }
 
 /* Compute the discrete mean of `var` over the owned nodes of every
@@ -206,125 +219,4 @@ double problem_compute_max_error(struct ngfs_3d *gfs,
     MPI_Allreduce(&local_err, &global_err, 1, MPI_DOUBLE, MPI_MAX,
                   gfs->domain.cart_comm);
     return global_err;
-}
-
-#include <string.h>
-
-void boundary_truncation_3d(struct ngfs_3d *gfs, int var_in, double *tau_buf)
-{
-    const int64_t nx = gfs->nx;
-    const int64_t ny = gfs->ny;
-    const int64_t nz = gfs->nz;
-    const double *u = gfs->vars[var_in]->val;
-
-    memset(tau_buf, 0, (size_t)gfs->n * sizeof(double));
-
-    if (!gfs->bc) return;
-
-    /* For each Neumann face the rank owns, accumulate the per-axis
-     * tau contribution into the boundary cell row's tau_buf entry.
-     * Sign: + on lower face, - on upper.  The third-derivative
-     * estimate at the boundary cell is a centred 4-point FD using
-     * the four nearest interior cells, evaluated at the boundary
-     * cell's own location -- correct to O(h), which gives O(h^2)
-     * accuracy in tau itself.  */
-
-    /* Lower-x */
-    if (gfs->domain.lower_x_rank == INVALID_RANK
-            && gfs->bc->face[FACE_LOWER_X].kind == BC_NEUMANN) {
-        const double scale = gfs->dx / 24.0;
-        const double inv_h3 = 1.0 / (gfs->dx * gfs->dx * gfs->dx);
-        for (int64_t k = 0; k < nz; k++)
-            for (int64_t j = 0; j < ny; j++) {
-                const int64_t i1 = gf_indx_3d(gfs, 1, j, k);
-                const int64_t i2 = gf_indx_3d(gfs, 2, j, k);
-                const int64_t i3 = gf_indx_3d(gfs, 3, j, k);
-                const int64_t i4 = gf_indx_3d(gfs, 4, j, k);
-                const double uxxx =
-                    (u[i4] - 3.0 * u[i3] + 3.0 * u[i2] - u[i1]) * inv_h3;
-                tau_buf[i1] += scale * uxxx;
-            }
-    }
-    /* Upper-x */
-    if (gfs->domain.upper_x_rank == INVALID_RANK
-            && gfs->bc->face[FACE_UPPER_X].kind == BC_NEUMANN) {
-        const double scale = -gfs->dx / 24.0;
-        const double inv_h3 = 1.0 / (gfs->dx * gfs->dx * gfs->dx);
-        for (int64_t k = 0; k < nz; k++)
-            for (int64_t j = 0; j < ny; j++) {
-                const int64_t in_2 = gf_indx_3d(gfs, nx - 2, j, k);
-                const int64_t in_3 = gf_indx_3d(gfs, nx - 3, j, k);
-                const int64_t in_4 = gf_indx_3d(gfs, nx - 4, j, k);
-                const int64_t in_5 = gf_indx_3d(gfs, nx - 5, j, k);
-                const double uxxx =
-                    (u[in_2] - 3.0 * u[in_3] + 3.0 * u[in_4] - u[in_5]) * inv_h3;
-                tau_buf[in_2] += scale * uxxx;
-            }
-    }
-
-    /* Lower-y */
-    if (gfs->domain.lower_y_rank == INVALID_RANK
-            && gfs->bc->face[FACE_LOWER_Y].kind == BC_NEUMANN) {
-        const double scale = gfs->dy / 24.0;
-        const double inv_h3 = 1.0 / (gfs->dy * gfs->dy * gfs->dy);
-        for (int64_t k = 0; k < nz; k++)
-            for (int64_t i = 0; i < nx; i++) {
-                const int64_t j1 = gf_indx_3d(gfs, i, 1, k);
-                const int64_t j2 = gf_indx_3d(gfs, i, 2, k);
-                const int64_t j3 = gf_indx_3d(gfs, i, 3, k);
-                const int64_t j4 = gf_indx_3d(gfs, i, 4, k);
-                const double uyyy =
-                    (u[j4] - 3.0 * u[j3] + 3.0 * u[j2] - u[j1]) * inv_h3;
-                tau_buf[j1] += scale * uyyy;
-            }
-    }
-    /* Upper-y */
-    if (gfs->domain.upper_y_rank == INVALID_RANK
-            && gfs->bc->face[FACE_UPPER_Y].kind == BC_NEUMANN) {
-        const double scale = -gfs->dy / 24.0;
-        const double inv_h3 = 1.0 / (gfs->dy * gfs->dy * gfs->dy);
-        for (int64_t k = 0; k < nz; k++)
-            for (int64_t i = 0; i < nx; i++) {
-                const int64_t jn_2 = gf_indx_3d(gfs, i, ny - 2, k);
-                const int64_t jn_3 = gf_indx_3d(gfs, i, ny - 3, k);
-                const int64_t jn_4 = gf_indx_3d(gfs, i, ny - 4, k);
-                const int64_t jn_5 = gf_indx_3d(gfs, i, ny - 5, k);
-                const double uyyy =
-                    (u[jn_2] - 3.0 * u[jn_3] + 3.0 * u[jn_4] - u[jn_5]) * inv_h3;
-                tau_buf[jn_2] += scale * uyyy;
-            }
-    }
-
-    /* Lower-z */
-    if (gfs->domain.lower_z_rank == INVALID_RANK
-            && gfs->bc->face[FACE_LOWER_Z].kind == BC_NEUMANN) {
-        const double scale = gfs->dz / 24.0;
-        const double inv_h3 = 1.0 / (gfs->dz * gfs->dz * gfs->dz);
-        for (int64_t j = 0; j < ny; j++)
-            for (int64_t i = 0; i < nx; i++) {
-                const int64_t k1 = gf_indx_3d(gfs, i, j, 1);
-                const int64_t k2 = gf_indx_3d(gfs, i, j, 2);
-                const int64_t k3 = gf_indx_3d(gfs, i, j, 3);
-                const int64_t k4 = gf_indx_3d(gfs, i, j, 4);
-                const double uzzz =
-                    (u[k4] - 3.0 * u[k3] + 3.0 * u[k2] - u[k1]) * inv_h3;
-                tau_buf[k1] += scale * uzzz;
-            }
-    }
-    /* Upper-z */
-    if (gfs->domain.upper_z_rank == INVALID_RANK
-            && gfs->bc->face[FACE_UPPER_Z].kind == BC_NEUMANN) {
-        const double scale = -gfs->dz / 24.0;
-        const double inv_h3 = 1.0 / (gfs->dz * gfs->dz * gfs->dz);
-        for (int64_t j = 0; j < ny; j++)
-            for (int64_t i = 0; i < nx; i++) {
-                const int64_t kn_2 = gf_indx_3d(gfs, i, j, nz - 2);
-                const int64_t kn_3 = gf_indx_3d(gfs, i, j, nz - 3);
-                const int64_t kn_4 = gf_indx_3d(gfs, i, j, nz - 4);
-                const int64_t kn_5 = gf_indx_3d(gfs, i, j, nz - 5);
-                const double uzzz =
-                    (u[kn_2] - 3.0 * u[kn_3] + 3.0 * u[kn_4] - u[kn_5]) * inv_h3;
-                tau_buf[kn_2] += scale * uzzz;
-            }
-    }
 }
