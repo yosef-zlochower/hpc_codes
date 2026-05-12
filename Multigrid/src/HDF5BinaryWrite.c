@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "domain.h"
 #include "gf.h"
@@ -207,6 +208,61 @@ static void write_metadata_2d(hid_t file_id, const struct ngfs_2d *gfs)
 
 /* ---- Public writer entry points ---------------------------------------- */
 
+/* Per-process record of "have I already written to this file in the
+ * current run?".  We track up to MAX_TRACKED filenames; in practice
+ * each rank writes to exactly one file (rank_<R>.h5), so this is
+ * generous.
+ *
+ * Semantics:
+ *   * First call this run for a given filename -- if the file already
+ *     exists on disk we *abort* with a clear error rather than
+ *     truncating, so the user cannot accidentally clobber a previous
+ *     run's output.  Otherwise we create the file fresh and write
+ *     metadata.
+ *   * Subsequent calls this run targeting the same filename open it
+ *     RDWR and append additional datasets without rewriting metadata.
+ *
+ * The strdup'd filenames are never freed; for the short-lived programs
+ * here (driver / tests) the OS reclaims at process exit. */
+#define MAX_TRACKED 32
+static const char *g_seen_files[MAX_TRACKED] = {0};
+static int g_seen_count = 0;
+
+static int file_seen_this_run(const char *filename)
+{
+    for (int i = 0; i < g_seen_count; i++)
+        if (g_seen_files[i] && strcmp(g_seen_files[i], filename) == 0)
+            return 1;
+    return 0;
+}
+
+static void mark_file_seen(const char *filename)
+{
+    if (g_seen_count >= MAX_TRACKED) return;       /* defensive */
+    /* strdup so the entry survives past the caller's stack frame. */
+    char *copy = strdup(filename);
+    if (!copy) return;
+    g_seen_files[g_seen_count++] = copy;
+}
+
+/* Refuse to overwrite a pre-existing output file.  Returns 0 if the
+ * caller may proceed to create `filename`, -1 if the file already
+ * exists on disk (with a diagnostic printed to stderr).  Use
+ * access(F_OK) rather than H5Fis_hdf5 so that any stale file -- not
+ * just a valid HDF5 one -- triggers the abort. */
+static int refuse_if_exists(const char *filename, int rank)
+{
+    if (access(filename, F_OK) == 0) {
+        fprintf(stderr,
+                "rank %d: refusing to overwrite existing output file '%s'.\n"
+                "        Delete the file (or change [output] dir) before re-running\n"
+                "        so a previous solution is not silently lost.\n",
+                rank, filename);
+        return -1;
+    }
+    return 0;
+}
+
 static int write_dataset(hid_t file_id, const char *datasetname,
                          int ndim, const size_t local_dim[],
                          const double *data)
@@ -233,21 +289,28 @@ int BinaryWriteArray_3d(const char *filename, const char *datasetname,
                         const struct ngfs_3d *gfs)
 {
     int error_count = 0;
-    int file_exists = 0;
     hid_t file_id;
 
-    H5E_BEGIN_TRY { file_exists = H5Fis_hdf5(filename) > 0; } H5E_END_TRY;
-
-    if (file_exists)
+    if (file_seen_this_run(filename))
     {
+        /* Append a new dataset to a file we already created this run;
+         * metadata is already there. */
         HDF5_ERROR(file_id = H5Fopen(filename, H5F_ACC_RDWR, H5P_DEFAULT));
     }
     else
     {
-        HDF5_ERROR(file_id = H5Fcreate(filename, H5F_ACC_TRUNC,
+        /* First call this run for this filename.  Refuse to overwrite
+         * a pre-existing file so the user does not silently lose a
+         * previously computed solution; if the slot is free, create
+         * fresh and write metadata. */
+        if (refuse_if_exists(filename, gfs->domain.rank) != 0)
+            return -1;
+        HDF5_ERROR(file_id = H5Fcreate(filename, H5F_ACC_EXCL,
                                        H5P_DEFAULT, H5P_DEFAULT));
-        if (file_id >= 0)
+        if (file_id >= 0) {
             write_metadata_3d(file_id, gfs);
+            mark_file_seen(filename);
+        }
     }
 
     if (file_id < 0)
@@ -268,21 +331,22 @@ int BinaryWriteArray_2d(const char *filename, const char *datasetname,
                         const struct ngfs_2d *gfs)
 {
     int error_count = 0;
-    int file_exists = 0;
     hid_t file_id;
 
-    H5E_BEGIN_TRY { file_exists = H5Fis_hdf5(filename) > 0; } H5E_END_TRY;
-
-    if (file_exists)
+    if (file_seen_this_run(filename))
     {
         HDF5_ERROR(file_id = H5Fopen(filename, H5F_ACC_RDWR, H5P_DEFAULT));
     }
     else
     {
-        HDF5_ERROR(file_id = H5Fcreate(filename, H5F_ACC_TRUNC,
+        if (refuse_if_exists(filename, gfs->domain.rank) != 0)
+            return -1;
+        HDF5_ERROR(file_id = H5Fcreate(filename, H5F_ACC_EXCL,
                                        H5P_DEFAULT, H5P_DEFAULT));
-        if (file_id >= 0)
+        if (file_id >= 0) {
             write_metadata_2d(file_id, gfs);
+            mark_file_seen(filename);
+        }
     }
 
     if (file_id < 0)
