@@ -12,6 +12,8 @@
 \usepackage{enumitem}
 \usepackage{xcolor}
 \usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
 \usepackage[hidelinks]{hyperref}
 \usepackage{cleveref}
 
@@ -228,33 +230,165 @@ discrete compatibility $\sum f_h = 2\sum_{\partial\Omega} q/h$ does
 not match the continuous compatibility $\int f = \int q$, a
 factor-of-two artefact of the boundary node carrying full-cell
 weight in the row sum.  We therefore use a different layout
-\emph{per axis}, chosen by the BC pair on that axis:
+\emph{per axis}, chosen by the BC pair on that axis.
 
+\Cref{fig:axis-layouts} shows the four configurations in 1D
+(the choice is independent on each axis, so the 3D layout is the
+tensor product of three 1D layouts).  Filled circles are interior
+cell or vertex \emph{values stored at that slot}; the square marker
+is the Dirichlet vertex slot, whose value is fixed by
+\texttt{apply\_bc\_3d} from the per-face callback; open circles are
+Neumann ghost slots, whose value is set by the mirror formula.  The
+domain boundary $x = a_a$ or $x = b_a$ is the vertical dashed line;
+crucially, on cell-centred axes the boundary does \emph{not}
+coincide with a stored slot -- it falls between the first interior
+cell centre and its Neumann ghost.
+
+\begin{figure}[ht]
+\centering
+\newcommand{\axisrow}[2]{%
+  % #1 = label (top), #2 = drawing commands
+  \begin{tikzpicture}[scale=0.95,>=stealth,line width=0.4pt]
+    \node[anchor=west] at (-0.8,1.1) {\textbf{#1}};
+    \draw[->,thick] (-1.1,0) -- (5.4,0) node[right] {$x$};
+    #2
+  \end{tikzpicture}}
+% --- D--D (vertex-centred): N+1 vertices, both ends Dirichlet ---
+\axisrow{D--D axis: $N_a{+}1$ vertex-centred slots
+        ($i = 0, \dots, N_a$)}{%
+  % domain boundaries
+  \draw[dashed,thick,gray!70] (0,-1.1) -- (0,0.95);
+  \draw[dashed,thick,gray!70] (4,-1.1) -- (4,0.95);
+  \node[gray!60!black,font=\scriptsize] at (0,-1.0) {$x = a_a$};
+  \node[gray!60!black,font=\scriptsize] at (4,-1.0) {$x = b_a$};
+  % three interior vertices are filled circles, the two ends are
+  % Dirichlet vertices drawn as filled squares (boundary coincides
+  % with stored slot)
+  \foreach \i in {1,2,3} {
+    \filldraw (\i,0) circle (0.08);
+    \node[below=4pt] at (\i,-0.1) {\scriptsize $i{=}\i$};}
+  \draw[fill=black] (-0.08,-0.08) rectangle (0.08,0.08);
+  \draw[fill=black] (4-0.08,-0.08) rectangle (4+0.08,0.08);
+  \node[below=4pt] at (0,-0.1) {\scriptsize $i{=}0$};
+  \node[below=4pt] at (4,-0.1) {\scriptsize $i{=}N_a$};
+  \node[above=2pt] at (0,0.1) {\scriptsize $u_v$};
+  \node[above=2pt] at (4,0.1) {\scriptsize $u_v$};
+}
+
+\vspace{1em}
+
+% --- N--N (cell-centred): N+2 slots, two ghosts ---
+\axisrow{N--N axis: $N_a{+}2$ cell-centred slots
+        ($i = 0, \dots, N_a{+}1$, two ghosts)}{%
+  \draw[dashed,thick,gray!70] (0,-1.1) -- (0,0.95);
+  \draw[dashed,thick,gray!70] (4,-1.1) -- (4,0.95);
+  \node[gray!60!black,font=\scriptsize] at (0,-1.0) {$x = a_a$};
+  \node[gray!60!black,font=\scriptsize] at (4,-1.0) {$x = b_a$};
+  % interior cell centres at h/2, 3h/2, 5h/2, 7h/2 (four cells for N=4)
+  \foreach \pos/\lab in {0.5/1, 1.5/2, 2.5/3, 3.5/4} {
+    \filldraw (\pos,0) circle (0.08);
+    \node[below=4pt] at (\pos,-0.1) {\scriptsize $i{=}\lab$};}
+  % Neumann ghost slots at -h/2 and (N+1/2)h
+  \draw[fill=white,line width=0.6pt] (-0.5,0) circle (0.08);
+  \draw[fill=white,line width=0.6pt] (4.5,0) circle (0.08);
+  \node[below=4pt] at (-0.5,-0.1) {\scriptsize $i{=}0$};
+  \node[below=4pt] at (4.5,-0.1) {\scriptsize $i{=}N_a{+}1$};
+  \node[above=2pt] at (-0.5,0.1) {\scriptsize ghost};
+  \node[above=2pt] at (4.5,0.1) {\scriptsize ghost};
+}
+
+\vspace{1em}
+
+% --- D--N (hybrid): N+2 slots, D vertex at lower, N ghost at upper ---
+\axisrow{D--N axis: $N_a{+}2$ slots, D vertex on lower face}{%
+  \draw[dashed,thick,gray!70] (0,-0.75) -- (0,0.75);
+  \draw[dashed,thick,gray!70] (4,-0.75) -- (4,0.75);
+  \node[gray!60!black,font=\scriptsize] at (0,-1.0) {$x = a_a$};
+  \node[gray!60!black,font=\scriptsize] at (4,-1.0) {$x = b_a$};
+  % Dirichlet vertex at x = a (i=0)
+  \draw[fill=black] (-0.08,-0.08) rectangle (0.08,0.08);
+  \node[below=4pt] at (-.2,-0.1) {\scriptsize $i{=}0$};
+  \node[above=2pt] at (0,0.1) {\scriptsize $u_v$};
+  % interior cell centres at h/2, 3h/2, 5h/2, 7h/2 (i=1..4)
+  \foreach \pos/\lab in {0.5/1, 1.5/2, 2.5/3, 3.5/4} {
+    \filldraw (\pos,0) circle (0.08);
+    \node[below=4pt] at (\pos,-0.1) {\scriptsize $i{=}\lab$};}
+  % Neumann ghost at (N+1/2)h
+  \draw[fill=white,line width=0.6pt] (4.5,0) circle (0.08);
+  \node[below=4pt] at (4.6,-0.1) {\scriptsize $i{=}N_a{+}1$};
+  \node[above=2pt] at (4.5,0.1) {\scriptsize ghost};
+  % half-step indicator
+  \draw[<->,thin,gray] (0,0.65) -- (0.5,0.65);
+  \node[gray!60!black,font=\scriptsize] at (0.25,0.8) {$h_a/2$};
+}
+
+\vspace{1em}
+
+% --- N--D (hybrid): N+2 slots, N ghost at lower, D vertex at upper ---
+\axisrow{N--D axis: $N_a{+}2$ slots, D vertex on upper face}{%
+  \draw[dashed,thick,gray!70] (0,-.75) -- (0,0.75);
+  \draw[dashed,thick,gray!70] (4,-.75) -- (4,0.75);
+  \node[gray!60!black,font=\scriptsize] at (0,-1.0) {$x = a_a$};
+  \node[gray!60!black,font=\scriptsize] at (4,-1.0) {$x = b_a$};
+  % Neumann ghost at -h/2 (i=0)
+  \draw[fill=white,line width=0.6pt] (-0.5,0) circle (0.08);
+  \node[below=4pt] at (-0.5,-0.1) {\scriptsize $i{=}0$};
+  \node[above=2pt] at (-0.5,0.1) {\scriptsize ghost};
+  % interior cell centres at h/2, 3h/2, 5h/2, 7h/2 (i=1..3);
+  % the i=4 label is anchored east (text extends LEFT from x=3.5)
+  % so it sits clear of the wider i=Na+1 label at x=4.
+  \foreach \pos/\lab in {0.5/1, 1.5/2, 2.5/3} {
+    \filldraw (\pos,0) circle (0.08);
+    \node[below=4pt] at (\pos,-0.1) {\scriptsize $i{=}\lab$};}
+  \filldraw (3.5,0) circle (0.08);
+  \node[anchor=north east,font=\scriptsize] at (3.45,-0.18) {$i{=}4$};
+  % Dirichlet vertex at x = b (i=N+1); label anchored west (text
+  % extends RIGHT from x=4) so it does not collide with i=4.
+  \draw[fill=black] (4-0.08,-0.08) rectangle (4+0.08,0.08);
+  \node[anchor=north west,font=\scriptsize] at (4.05,-0.18) {$i{=}N_a{+}1$};
+  \node[above=2pt] at (4,0.1) {\scriptsize $u_v$};
+  % half-step indicator
+  \draw[<->,thin,gray] (3.5,0.70) -- (4,0.70);
+  \node[gray!60!black,font=\scriptsize] at (3.75,0.85) {$h_a/2$};
+}
+\caption{Per-axis grid layouts ($N_a = 4$ cells shown).  Filled
+circles: interior cell centres.  Filled squares: Dirichlet vertex
+slots (value set by \texttt{apply\_bc\_3d} at the boundary
+coordinate).  Open circles: Neumann ghost slots (value set by the
+mirror formula $u_{\text{ghost}} = u_{\text{int}} + h_a\,q$).
+Dashed lines mark the physical-boundary coordinates $x = a_a$ and
+$x = b_a$.  The half-step $h_a/2$ between a Dirichlet vertex and
+the first interior cell centre is the defining feature of hybrid
+axes.}
+\label{fig:axis-layouts}
+\end{figure}
+
+The four cases differ in stored-slot count and spacing:
 \begin{itemize}
-  \item \textbf{D--D axis (both ends Dirichlet)}: vertex-centred,
-    $N_a + 1$ grid points, lowest at $a_a$, highest at $b_a$, uniform
-    spacing $h_a = (b_a - a_a)/N_a$ throughout.  This is the original
-    layout above.
-  \item \textbf{N--N axis (both ends Neumann)}: cell-centred, $N_a + 2$
-    grid points, lowest at $a_a - h_a/2$, highest at $b_a + h_a/2$,
-    uniform spacing.  The two extra points are \emph{ghost cells};
+  \item \textbf{D--D axis} (both ends Dirichlet): $N_a + 1$
+    vertex-centred slots at $x = a_a + i h_a$, $i = 0, \dots, N_a$.
+    The two end slots hold Dirichlet vertex values; uniform spacing
+    $h_a$ throughout.
+  \item \textbf{N--N axis} (both ends Neumann): $N_a + 2$ slots,
+    lowest at $a_a - h_a/2$, highest at $b_a + h_a/2$, uniform
+    spacing $h_a$.  The two extreme slots are \emph{ghost cells};
     \texttt{apply\_bc\_3d} writes them via the centred-difference
-    Neumann mirror $u_{\text{ghost}} = u_{\text{int}} + h_a\,q$, where
-    $q = \partial u/\partial n$ at the boundary plane (midway between
-    the ghost and the first interior cell centre).  Compatibility
-    becomes $\sum f_h = \sum_{\partial\Omega} q/h$, matching the
+    Neumann mirror
+    $u_{\text{ghost}} = u_{\text{int}} + h_a\,q$, where
+    $q = \partial u/\partial n$ at the boundary plane (midway
+    between the ghost and the first interior cell centre).
+    Compatibility becomes
+    $\sum f_h = \sum_{\partial\Omega} q/h$, matching the
     continuous condition under midpoint quadrature.
-  \item \textbf{D--N or N--D axis (hybrid)}: mixed -- the Dirichlet
-    end has the boundary-on-vertex layout, the Neumann end has the
-    cell-centred layout, and one inevitable \emph{half-step} of width
-    $h_a/2$ sits between the Dirichlet vertex and the first interior
-    cell centre on that axis.  Spacing is uniform $h_a$ everywhere
-    else.  At the cell adjacent to the Dirichlet vertex the
-    seven-point stencil is replaced on the affected axis by the
-    non-uniform 3-point formula
-    $u_{xx} \approx (4/(3h_a^2))(2u_v - 3u_i + u_{\text{far}})$
-    where $u_v$ is the vertex value and $u_{\text{far}}$ the
-    next-deeper interior cell.
+  \item \textbf{D--N or N--D axis} (hybrid): $N_a + 2$ slots; one
+    end is a Dirichlet vertex placed exactly at the boundary
+    coordinate, the other is a Neumann ghost half a cell outside.
+    A single half-step $h_a/2$ separates the Dirichlet vertex from
+    the first interior cell centre on that axis; all other
+    spacings are $h_a$.  The cell adjacent to the Dirichlet vertex
+    uses a non-uniform 4-point one-sided second-derivative on that
+    axis (\Cref{sec:smoother-impl}); other cells use the standard
+    centred-difference stencil.
 \end{itemize}
 
 The layout is encoded by per-face Neumann flags carried on
@@ -263,16 +397,21 @@ every multigrid level (\Cref{sec:hierarchy}) and is a property of
 the problem, not of the grid resolution.  Pure D--D problems are
 unaffected by these changes.
 
-The simple Neumann mirror has $\bigO(h^3)$ ghost truncation, which
-gives $\bigO(h)$ truncation in the boundary-cell Laplacian when
-$\partial^3_a u$ does not vanish at the boundary.  Globally this
-degrades the pointwise convergence rate to $\sim 1.5$ at $h = 1/128$
-on inhomogeneous Neumann presets where this derivative is
-non-zero (the homogeneous companions retain rate 2 by symmetry).
-The 4-point higher-order one-sided extrapolation
-$u_{\text{ghost}} = (21/23) u_1 + (3/23) u_2 - (1/23) u_3 + (24/23) h\, q$
-gives $\bigO(h^4)$ ghost truncation $\to$ rate 2 globally; it is
-deferred to a follow-up phase (see \texttt{Plan.md}).
+\paragraph{Endpoint slots and the $L^\infty$ metric.}
+On any axis with a Neumann face, the cell-centred coordinate that
+the formula $x_i = x_0^{\text{(shifted)}} + i h_a$ produces at the
+endpoint slots does not coincide with the value
+\texttt{apply\_bc\_3d} stored there: a pure-Neumann ghost holds the
+mirror value (no physical interpretation at its formula coordinate),
+and a hybrid Dirichlet vertex holds the boundary value at the face
+coordinate (which is $h_a/2$ from its formula coordinate).
+\texttt{problem\_compute\_max\_error} accordingly skips both
+endpoint slots on Neumann-bearing axes; pure D--D axes keep both
+endpoints (the formula coordinate coincides with the boundary).
+The output writer's \texttt{owned\_bounds\_3d} helper applies the
+same rule, so the assembled global field rendered by
+\texttt{scripts/make\_xdmf.py} matches the values that the metric
+sees.
 
 % =============================================================================
 \section{Stationary relaxation methods}\label{sec:relaxation}
@@ -397,38 +536,210 @@ A precise statement and proof under the appropriate regularity and
 approximation hypotheses is given in
 \cite[Ch.~6]{hackbusch1985multi} and \cite[Ch.~7]{trottenberg2001multigrid}.
 
-\subsection{Transfer operators on a node-based grid}\label{sec:transfer}
-\paragraph{Restriction.}  We use \emph{full-weighting} restriction with the
-$3\times 3\times 3$ stencil
+\subsection{Transfer operators}\label{sec:transfer}
+The code carries \emph{two} pairs of transfer operators and picks one
+at every level based on the per-axis layout
+(\Cref{sec:cell-centred-layout}):
+\begin{itemize}
+\item If every axis is \emph{purely Dirichlet} (D--D on all three),
+  the level uses the historical vertex-centred operators
+  \texttt{inject\_var\_3d} + \texttt{restrict\_var\_3d} (full-weighting
+  restriction) and \texttt{prolong\_var\_3d} (trilinear interpolation),
+  documented in
+  \Cref{sec:transfer-dd}.
+\item If \emph{any} axis carries at least one Neumann face (the
+  remaining seven of the eight 3-axis combinations: NN-DD-DD,
+  hybrid-DD-DD, NN-NN-DD, hybrid-hybrid-DD, NN-NN-NN, etc.),
+  the level uses the cell-centred operators
+  \texttt{restrict\_var\_cc\_3d} (box-average restriction) and
+  \texttt{prolong\_var\_cc\_3d} (cc trilinear interpolation with a
+  position-aware override at hybrid Dirichlet vertices), documented
+  in \Cref{sec:transfer-cc}.
+\end{itemize}
+The choice is made once at hierarchy-construction time and persists
+across every level (the layout is invariant under coarsening; see
+\Cref{sec:hierarchy}).  Both pairs are second-order accurate; the
+cc pair is what enables a uniform stencil across every Neumann face
+without the half-cell offset and the discrete compatibility mismatch
+that the vertex-centred pair would introduce.
+
+\subsubsection{Vertex-centred operators (D--D axes)}\label{sec:transfer-dd}
+On every axis the coarse-grid index $I$ maps to the fine-grid index
+$2I$; the coarse grid is a subset of the fine grid, and every coarse
+slot has a coincident fine slot.
+
+\paragraph{Restriction.}
+\emph{Full-weighting} restriction with the $3\times 3\times 3$
+stencil
 \begin{equation}\label{eq:full-weighting}
-  (R_h^H d)_{IJK} = \tfrac{1}{64}\!\!
+  (R_h^H d)_{IJK} \;=\; \tfrac{1}{64}\!\!
   \sum_{p,q,r\in\{-1,0,1\}}\!\! w_{pqr}\, d_{2I+p,\,2J+q,\,2K+r},
 \end{equation}
 with weights $w_{000}=8$, $w=4$ on the six face-adjacent points,
-$w=2$ on the twelve edge-adjacent points, and $w=1$ on the eight corners
-(total weight $64$).  This is the natural generalisation to three
-dimensions of the canonical 2D full-weighting operator and is the
-standard choice for the Poisson problem
+$w=2$ on the twelve edge-adjacent points, and $w=1$ on the eight
+corners (total weight $64$).  Standard 3D generalisation of the
+canonical 2D full-weighting operator
 \cite[\S3.5]{briggs2000multigrid}, \cite[\S2.3]{trottenberg2001multigrid}.
 
-\paragraph{Prolongation.}  We use \emph{trilinear} interpolation: a
-fine-grid point at parity $(p_x,p_y,p_z)\in\{0,1\}^3$ relative to its
-coarse cell is set to the average of the $2^{p_x+p_y+p_z}$ surrounding
-coarse-grid points.  Concretely, with $p_x+p_y+p_z = 0,1,2,3$
-this gives copy, two-point average, four-point average, eight-point
-average respectively.  Trilinear prolongation is the formal adjoint of
-full-weighting restriction up to a factor of 8, so the pair
-$(R_h^H, P_H^h)$ satisfies the variational property
-$P_H^h = c (R_h^H)^T$ that underlies most multigrid convergence proofs
-\cite[\S2.3.4]{trottenberg2001multigrid}.
+\paragraph{Prolongation.}
+\emph{Trilinear} interpolation: a fine-grid point at parity
+$(p_x, p_y, p_z) \in \{0,1\}^3$ relative to its coarse cell takes the
+$2^{p_x+p_y+p_z}$-point average of the surrounding coarse vertices.
+Writing $u_I^H$ for the coarse value at coarse index $I$ and $u_i^h$
+for the fine value at fine index $i = 2I + p$:
+\begin{equation}\label{eq:prolong-dd}
+  (P_H^h u^H)_{2I+p_x,\,2J+p_y,\,2K+p_z}
+  \;=\;
+  \frac{1}{2^{p_x+p_y+p_z}}
+  \!\!\!\sum_{(\alpha,\beta,\gamma)}\!\!
+  u^H_{I+\alpha,\,J+\beta,\,K+\gamma},
+\end{equation}
+where the sum runs over $\alpha \in \{0, p_x\}$,
+$\beta \in \{0, p_y\}$, $\gamma \in \{0, p_z\}$ (so the eight terms
+collapse to a single copy when $p_x = p_y = p_z = 0$, a two-point
+average when exactly one parity is~1, etc.).  This is the formal
+adjoint of full-weighting up to a factor of 8 -- the variational
+relation $P_H^h = c (R_h^H)^T$ that underlies most multigrid
+convergence proofs \cite[\S2.3.4]{trottenberg2001multigrid}.
 
-\paragraph{Injection.}  At coincident points (i.e.\ at every coarse-grid
-node, which by construction lies on the fine grid as well), the
-\emph{injection} operator simply copies the fine value.  In this code
-injection is used to seed the coarse-grid right-hand side at the
-boundary nodes, after which restriction overwrites the interior
-nodes; this avoids special-casing of the restriction stencil at
-boundary points.
+\paragraph{Injection.}
+At every coarse vertex (which by construction is also a fine vertex),
+\emph{injection} copies the fine value:
+$(I_h^H u^h)_{I} = u^h_{2I}$.  The code uses this to seed the
+coarse-grid right-hand side at boundary slots before full-weighting
+overwrites the interior, avoiding any boundary special-case in the
+restriction stencil.
+
+\subsubsection{Cell-centred operators (any Neumann face
+present)}\label{sec:transfer-cc}
+On a cell-centred or hybrid axis the coarse cell at index $I$ spans
+the two fine cells at indices $2I - 1$ and $2I$ -- there is no
+coincident slot, and the coarse-cell centre lies midway between two
+fine-cell centres (\Cref{fig:cc-coarsening}).  Restriction is the
+volume-weighted average over the eight fine cells inside the coarse
+cell; prolongation is trilinear with weights set by the relative
+position of the fine cell inside the enclosing coarse cell.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[scale=0.95,>=stealth,line width=0.4pt]
+  % Coarse cells (top row, large)
+  \draw[thick] (0,1.5) -- (4,1.5);
+  \foreach \x in {0,2,4} {\draw[thick] (\x,1.4) -- (\x,1.6);}
+  \filldraw (1,1.5) circle (0.10);
+  \filldraw (3,1.5) circle (0.10);
+  \node[above] at (1,1.6) {\scriptsize coarse $I$};
+  \node[above] at (3,1.6) {\scriptsize coarse $I{+}1$};
+  \node[left] at (0,1.5) {\textbf{coarse:}};
+  % Fine cells (bottom row, small)
+  \draw[thick] (0,0) -- (4,0);
+  \foreach \x in {0,1,2,3,4} {\draw[thick] (\x,-0.1) -- (\x,0.1);}
+  \foreach \pos/\lab in {0.5/2I-1, 1.5/2I, 2.5/2I+1, 3.5/2I+2} {
+    \filldraw (\pos,0) circle (0.07);
+    \node[below] at (\pos,-0.15) {\scriptsize \lab};}
+  \node[left] at (0,0) {\textbf{fine:}};
+  % Mapping arrows
+  \draw[dashed,gray!70] (1,1.5) -- (0.5,0);
+  \draw[dashed,gray!70] (1,1.5) -- (1.5,0);
+  \draw[dashed,gray!70] (3,1.5) -- (2.5,0);
+  \draw[dashed,gray!70] (3,1.5) -- (3.5,0);
+\end{tikzpicture}
+\caption{Cell-centred coarsening on one axis.  The coarse cell at
+index $I$ spans fine cells $2I{-}1$ and $2I$; the coarse-cell centre
+lies midway between the two fine-cell centres (no coincident slot).
+The cc transfer operators average / interpolate accordingly.}
+\label{fig:cc-coarsening}
+\end{figure}
+
+\paragraph{Restriction.}
+The cc restriction is the eight-point box average over the fine cells
+whose centres lie inside the coarse cell:
+\begin{equation}\label{eq:restrict-cc}
+  (R_h^H d)_{IJK}
+  \;=\; \tfrac{1}{8}\!\!
+  \sum_{p,q,r\in\{-1,0\}}\!\! d_{2I+p,\,2J+q,\,2K+r}.
+\end{equation}
+All eight weights are $\frac{1}{8}$.  This is the natural restriction
+when the coarse cell is the union of eight fine cells of equal
+volume; it is exact on constants by inspection, second-order on
+smooth fields by symmetry of the offsets about the coarse-cell
+centre, and self-adjoint in the discrete $\ell^2$ inner product up
+to a factor of~$8$.
+
+\paragraph{Prolongation: standard cc trilinear weights.}
+Let $u^H$ denote the coarse correction.  A fine cell at fine index
+$i = 2I + p$ (with $p \in \{-1, 0\}$, encoding which half of the
+coarse cell it sits in) has axial offset $\delta_x = -p$
+(so $\delta_x = 1$ when $p = 0$, $\delta_x = -1$ when $p = -1$;
+i.e.\ the fine cell is on the side $\delta_x$ of the coarse-cell
+centre).  The standard tensor-product cc trilinear formula uses
+per-axis weights $(\tfrac{3}{4}, \tfrac{1}{4})$ -- near coarse cell
+gets $\tfrac{3}{4}$, far coarse cell on the same side gets
+$\tfrac{1}{4}$:
+\begin{equation}\label{eq:prolong-cc}
+  (P_H^h u^H)_{2I+p_x,\,2J+p_y,\,2K+p_z}
+  \;=\!\!\!
+  \sum_{(s_x,s_y,s_z)\in\{0,\delta\}^3}\!\!
+  w^{(x)}_{s_x}\,w^{(y)}_{s_y}\,w^{(z)}_{s_z}\;
+  u^H_{I+s_x,\,J+s_y,\,K+s_z},
+\end{equation}
+where the per-axis weight is
+$w^{(a)}_0 = \tfrac{3}{4}$ (near coarse cell) and
+$w^{(a)}_{\delta_a} = \tfrac{1}{4}$ (far coarse cell, on the same
+side as the fine cell).  Expanding the tensor product, the eight
+weights are $\tfrac{27}{64}, \tfrac{9}{64}, \tfrac{9}{64},
+\tfrac{9}{64}, \tfrac{3}{64}, \tfrac{3}{64}, \tfrac{3}{64},
+\tfrac{1}{64}$ for the eight coarse cells (centre, three
+face-adjacent, three edge-adjacent, one corner) -- the
+direct analogue of the trilinear-bilinear weights for the cc
+geometry.  Both the restriction \eqref{eq:restrict-cc} and the
+prolongation \eqref{eq:prolong-cc} are second-order accurate; the
+pair satisfies $P_H^h = 8\,(R_h^H)^T$ for the box-average inner
+product, the cc analogue of the variational relation.
+
+\paragraph{Prolongation: position-aware override at hybrid Dirichlet
+vertices.}
+The standard $(\tfrac{3}{4}, \tfrac{1}{4})$ split is correct when
+both the near and far coarse cells are interior cells at distance
+$h_c / 2$ and $3 h_c / 2$ from the fine cell centre, respectively.
+At the fine cell adjacent to a hybrid Dirichlet vertex, the
+\emph{far} coarse slot is the coarse Dirichlet vertex itself,
+which sits at the boundary -- distance $h_c / 2$ \emph{plus} a
+half-cell, not $3 h_c / 2$.  More precisely (see
+\Cref{fig:axis-layouts}), the fine cell at axis index $i_p = 1$
+lives at $a_a + h_p / 2$ relative to the lower-D boundary, while
+the coarse vertex $u^H_{I=0}$ lives at $a_a$ and the coarse cell
+centre $u^H_{I=1}$ lives at $a_a + h_c / 2 = a_a + h_p$.  Both
+coarse slots are equidistant from the fine cell, so the
+geometrically correct linear interpolation weights on that axis
+are $(\tfrac{1}{2}, \tfrac{1}{2})$, not
+$(\tfrac{3}{4}, \tfrac{1}{4})$.  The override fires whenever
+\emph{this rank} owns the lower-D (or upper-D) boundary of the
+hybrid axis \emph{and} the fine cell sits at the global index
+$i_p = 1$ (or $i_p = N_a$, mirror form); on every other axis the
+standard weights are used.  The eight prolongation weights for a
+fine cell with $k$ axes in the override regime are still a tensor
+product of the per-axis weights; e.g.\ at the global corner
+$(i_p, j_p, k_p) = (1, 1, 1)$ of a D--N axis on every axis, each
+of the eight contributing coarse slots gets weight $\tfrac{1}{8}$
+(uniform).  The override preserves the second-order accuracy of
+the unmodified cc-trilinear formula and, crucially, fixes a
+hybrid-axis V-cycle convergence-rate degradation that the
+unmodified formula caused.
+
+\paragraph{Sign of the prolongation.}
+Because the code's defect convention is $d = \Delta_h u - f$ rather
+than $f - \Delta_h u$, the coarse correction $e_H$ solves
+$A_H e_H = d_H$ (not $-d_H$), and the fine-grid update is
+$u_h \leftarrow u_h - P_H^h e_H$.  Both \texttt{prolong\_var\_3d}
+and \texttt{prolong\_var\_cc\_3d} therefore \emph{subtract} the
+prolongated correction in place (\verb|pval[idx] -= update|).
+Physical Dirichlet boundary slots are skipped by both prolongations
+so the inhomogeneous Dirichlet data set by \texttt{apply\_bc\_3d}
+is preserved across coarse-grid corrections; Neumann boundary slots
+(ghost or vertex-on-hybrid) are not skipped, since on those faces
+the boundary slot is an unknown and the correction is non-zero
+there.
 
 \subsection{Convergence rate of the model V-cycle}
 For the constant-coefficient $d$-dimensional Laplacian discretised by
@@ -467,8 +778,12 @@ The code is layered.  From bottom to top:
 \item[\texttt{multigrid.\{c,h\}}] Hierarchy construction
   (\texttt{ngfs\_3d\_create\_hierarchy}), transfer operators
   (\texttt{inject\_var\_3d}, \texttt{restrict\_var\_3d},
-  \texttt{prolong\_var\_3d}), and the V-cycle driver
-  \texttt{vcycle\_3d}.
+  \texttt{prolong\_var\_3d} for D--D layouts;
+  \texttt{restrict\_var\_cc\_3d}, \texttt{prolong\_var\_cc\_3d}
+  for any layout with a Neumann face), and the V-cycle driver
+  \texttt{vcycle\_3d}.  The dispatch helper \texttt{all\_axes\_cc}
+  picks the cc pair on every level where at least one face is
+  Neumann; pure-Dirichlet levels keep the vertex-centred pair.
 \item[\texttt{io.\{c,h\}} and \texttt{HDF5BinaryWrite.\{c,h\}}]
   Per-rank HDF5 output.  Each rank writes
   \texttt{<dir>/rank\_<R>.h5}; metadata (dimensions, spacings,
@@ -581,33 +896,57 @@ coarsest grid of $c+1$ points per axis (or stops earlier on the
 \texttt{min\_cells} criterion).
 
 \subsection{Transfer operators}\label{sec:prolongation}
-The injection, restriction, and trilinear prolongation operators of
-\Cref{sec:transfer} are implemented in \texttt{inject\_var\_3d},
-\texttt{restrict\_var\_3d}, \texttt{prolong\_var\_3d}.  Two
-implementation details are worth highlighting:
+The vertex-centred operators of \Cref{sec:transfer-dd} are implemented
+in \texttt{inject\_var\_3d}, \texttt{restrict\_var\_3d},
+\texttt{prolong\_var\_3d}; the cell-centred operators of
+\Cref{sec:transfer-cc} are implemented in \texttt{restrict\_var\_cc\_3d}
+and \texttt{prolong\_var\_cc\_3d}.  \texttt{vcycle\_3d} consults the
+helper \texttt{all\_axes\_cc(level)} once per level and dispatches to
+the cc pair when any axis has a Neumann face, the vertex-centred
+pair otherwise.  Four implementation details are worth highlighting:
 \begin{itemize}[leftmargin=*]
-  \item \emph{Boundary handling in restriction.}  The full-weighting
-    stencil is applied only at interior coarse-grid points.  Coarse
-    boundary points are first overwritten by injection from the
-    fine-grid boundary, ensuring that homogeneous Dirichlet data on
-    the fine grid carries through unchanged.
+  \item \emph{Boundary handling in vertex-centred restriction.}
+    The full-weighting stencil is applied only at interior coarse-grid
+    points.  Coarse boundary points are first overwritten by injection
+    from the fine-grid boundary, ensuring that homogeneous Dirichlet
+    data on the fine grid carries through unchanged.  The cc
+    restriction has no analogous boundary case: every owned coarse
+    cell averages eight interior fine cells (no slot at the boundary).
 
   \item \emph{Sign of the prolongation.}  Because the code's defect
     convention is $d=\Delta_h u - f$ rather than $f - \Delta_h u$, the
     coarse correction $e_H$ is the solution of $A_H e_H = d_H$
     (\emph{not} $A_H e_H = -d_H$), and the fine-grid update is
-    $u_h \leftarrow u_h - P_H^h e_H$.  This is why
-    \texttt{prolong\_var\_3d} performs \verb|pval[idx] -= update|.
-    Physical boundary fine-grid points are skipped to preserve
-    the Dirichlet data set by \texttt{apply\_bc\_3d}.
+    $u_h \leftarrow u_h - P_H^h e_H$.  Both \texttt{prolong\_var\_3d}
+    and \texttt{prolong\_var\_cc\_3d} therefore subtract the
+    prolongated correction in place
+    (\verb|pval[idx] -= update|).  Physical Dirichlet boundary slots
+    are skipped by both prolongations so inhomogeneous Dirichlet data
+    set by \texttt{apply\_bc\_3d} is preserved across coarse-grid
+    corrections; Neumann boundary slots (ghost or vertex-on-hybrid)
+    are not skipped, since on those faces the boundary slot is an
+    unknown and the correction is non-zero there.
 
-  \item \emph{Ghost requirement.}  The trilinear stencil reads up to
-    one neighbouring coarse-grid point in each direction, so the
-    coarse correction's ghost layer must be valid before
-    \texttt{prolong\_var\_3d} is called.  In practice this is
-    guaranteed because the smoother (which is the last operation on
-    the coarse level before the recursion returns) leaves the ghost
-    layer of \texttt{VAR\_SOL} synchronised.
+  \item \emph{Position-aware weights at hybrid Dirichlet vertices.}
+    \texttt{prolong\_var\_cc\_3d} computes six per-axis predicates
+    (\texttt{x\_lower\_d\_v}, \texttt{x\_upper\_d\_v},
+    \texttt{y\_lower\_d\_v}, etc.) at the top of the function -- each
+    is true iff this rank owns the hybrid Dirichlet boundary on that
+    side.  Inside the kernel, the per-axis interpolation weights flip
+    from $(\tfrac{3}{4}, \tfrac{1}{4})$ to $(\tfrac{1}{2}, \tfrac{1}{2})$
+    on any axis where the predicate is true \emph{and} the fine cell
+    sits at global index $i_p = 1$ (lower D) or $i_p = N_a$ (upper D)
+    on that axis.  The override fixes a hybrid-axis V-cycle
+    convergence-rate degradation that the unmodified cc-trilinear
+    formula caused (see \texttt{Plan.md} \S 6.1).
+
+  \item \emph{Ghost requirement.}  Both trilinear stencils read up to
+    one neighbouring coarse-grid slot in each direction, so the
+    coarse correction's ghost layer must be valid before either
+    prolongation is called.  In practice this is guaranteed because
+    the smoother (the last operation on the coarse level before the
+    recursion returns) leaves the ghost layer of \texttt{VAR\_SOL}
+    synchronised.
 \end{itemize}
 
 \subsection{V-cycle}\label{sec:vcycle-impl}
