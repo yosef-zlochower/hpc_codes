@@ -1,0 +1,660 @@
+# Code Review: Multigrid Poisson Solver
+
+**Scope.**  A from-scratch review of the codebase on `main` at commit
+`a09677a` (the merge that brought the cell-centred work in).  Source
+inspected: every `.c`, `.h`, `.cc`, `.hpp`, `.cmake`, `.sh`, and `.py`
+file under `src/`, plus the top-level documentation
+(`Documentation.md`, `doc/documentation.tex`, `doc/tutorial.tex`,
+`Plan.md`, `CELL_CENTERED.md`).  Build system and test infrastructure
+exercised: a clean `cmake -B build-test -DBUILD_TESTING=ON && ctest`
+pass (15/15) ran on the same commit immediately before writing this
+review.
+
+The review is organised in three parts: a one-paragraph **overall
+assessment**, an inventory of **strengths**, and a severity-ordered
+list of **issues with recommended fixes**.  A short list of
+**recommendations** at the end picks out the few items that should
+land soon.
+
+---
+
+## Overall assessment
+
+This is a well-engineered teaching/research code that punches well
+above its size.  In ~6.5 kLOC of production C (excluding the
+~17 kLOC of vendored `toml.hpp`) it implements:
+
+* A 3D Poisson solver on a Cartesian box with arbitrary per-face
+  Dirichlet / Neumann boundary conditions.
+* Three layouts -- vertex-centred (pure D--D), cell-centred (pure
+  N--N), and hybrid -- chosen per axis based on the BC pair, with
+  per-cell stencil dispatch (4-point Lagrange at hybrid Dirichlet
+  vertices).
+* MPI parallelisation via a Cartesian topology and ghost-zone
+  exchange.
+* Geometric multigrid with two pairs of transfer operators
+  (vertex-centred full-weighting / trilinear; cell-centred
+  box-average / position-aware cc-trilinear) dispatched per level.
+* HDF5 output with an XDMF post-processor producing single-file
+  ParaView views.
+* A TOML parameter parser with allowlist validation and 64-bit /
+  range-checked 32-bit integer helpers.
+
+The codebase shows real care: nearly every public function carries a
+structured docstring; algorithmic decisions are explained in the
+comments (often citing the section of a textbook); a thorough test
+suite covers both operator-level invariants and end-to-end
+convergence rate; documentation is split into a formal reference
+manual (LaTeX, 21 pages) and a follow-along tutorial (LaTeX, 8
+pages).  The recent (cell-centred) work made the solver 2--18×
+faster than the previous version while *improving* accuracy on the
+hardest preset (mixed inhomogeneous BCs); the benchmark and report
+are checked in (`bench_results.csv`, `CELL_CENTERED.md`).  No real
+correctness bugs were found in the production code paths; the
+issues below are tech debt, polish, and one known-but-not-yet-fixed
+iterative-side limitation on singular Neumann problems.
+
+---
+
+## Strengths
+
+### Architecture
+
+The code is cleanly layered, and each layer has one job.  Reading
+top-to-bottom:
+
+1. **`domain.{c,h}`** -- MPI Cartesian decomposition.
+   `automatic_topology` picks per-axis rank counts by greedy prime
+   factorisation; `setup_3d_domain` builds the Cartesian
+   communicator, computes per-rank local extents via the 1D helper,
+   and stores per-face Neumann flags.
+2. **`gf.{c,h}`** -- Grid-function containers (`ngfs_3d`) and
+   per-variable storage (`gf`), plus pre-allocated face buffers for
+   sync, parent/child pointers for the MG hierarchy, and a per-level
+   `bc_spec_t *`.
+3. **`comm.{c,h}`** -- Ghost-zone sync.  The 3D version uses a
+   clean `IndexBox` abstraction and an `exchange_direction` helper
+   that handles one axis at a time with non-blocking MPI.
+4. **`bc.{c,h}` + `problem.h` + `problem_registry.c`** --
+   per-face BC kinds, callbacks, and a registry of named problem
+   presets.  `bc_spec_homogenize` produces the homogeneous variant
+   that coarse levels carry.
+5. **`gauss_seidel.{c,h}`** -- Red-black GS SOR smoother, defect
+   operator, and `apply_bc_3d` for face writes.  Each is self-
+   contained; the smoother and defect share the same stencil
+   dispatch (uniform centred 7-point everywhere except at cells
+   adjacent to a hybrid Dirichlet vertex, where a 4-point
+   one-sided Lagrange formula is substituted on the affected axis).
+6. **`multigrid.{c,h}`** -- Hierarchy construction (`create_child` /
+   `create_hierarchy`), two pairs of transfer operators (vertex-
+   centred + cell-centred), and `vcycle_3d` itself.  The
+   `all_axes_cc(level)` helper picks the right transfer pair at
+   each level.
+7. **`HDF5BinaryWrite.{c,h}` + `io.{c,h}`** -- Per-rank HDF5 output
+   with metadata, file-overwrite refusal, and a thin layer on top
+   for the `output_3d_gf` / `output_2d_gf` API.
+8. **`parameter.{cc,hpp}` + `multigrid_parameters.{cc,h}`** --
+   TOML parser, split into a C++-internal helper namespace and a
+   C-callable POD entry point so the C driver can include only the
+   POD struct.
+9. **`driver_multigrid.c`** -- Top-level program: parse TOML, build
+   domain + hierarchy, run V-cycle loop until tol or n_iters,
+   compute exact-solution error if available, write HDF5.
+
+Module dependencies form a clean DAG: each layer depends only on
+layers below it.  The public ABI of each layer is small and well
+documented.
+
+### Algorithm correctness
+
+* **Red-black ordering uses global indices** (`gauss_seidel.c:551`),
+  so the partition into red / black cells is consistent across MPI
+  rank boundaries regardless of decomposition.
+* **Per-axis layout dispatch.**  `axis_x_neumann()` and friends
+  (`gauss_seidel.c:27`) decide layout per axis from the per-face
+  Neumann flags.  Hybrid axes get the 4-point Lagrange stencil at
+  cell 1 (or `nx-2`) on the affected axis; the rest of the grid
+  uses the standard 7-point centred form.  The smoother and the
+  defect operator are consistent: both apply the same stencil
+  substitution (`gauss_seidel.c:478` and `gauss_seidel.c:646`).
+* **Position-aware cc prolongation.**  `prolong_var_cc_3d`
+  (`multigrid.c:748`) flips the per-axis interpolation weights from
+  the standard $(3/4, 1/4)$ to $(1/2, 1/2)$ at the fine cell
+  adjacent to a hybrid Dirichlet vertex -- the geometrically
+  correct choice when the coarse "far" slot is the D vertex at the
+  boundary rather than an interior cell.
+* **Two-pass post-smoother.**  `vcycle_3d` runs an SOR sweep with
+  the user's `omega` followed by a plain GS sweep (`omega = 1.0`);
+  the comment (`multigrid.c:1012-1031`) explains why -- SOR
+  accelerates the low-frequency error, plain GS guarantees the
+  $h$-independent high-frequency smoothing factor that the
+  coarse-grid step needs.
+* **Mean-zero projection for singular all-Neumann problems**
+  (`driver_multigrid.c:220`).  Stops the constant mode from
+  drifting under round-off during the V-cycle.
+* **Sign of the prolongation.**  Both `prolong_var_3d` and
+  `prolong_var_cc_3d` subtract the prolongated correction in
+  place (`pval[idx] -= update`), consistent with the
+  $d = \Delta_h u - f$ defect convention.
+
+### Build system
+
+`CMakeLists.txt` is short and explains itself.  Two cache options:
+
+* `BUILD_TESTING` (default `OFF`) gates whether the test harness
+  is compiled and registered with CTest.  Production builds are
+  driver-only.
+* `MULTIGRID_FAST_MATH` (auto-default tied to `BUILD_TESTING`)
+  adds `-ffast-math` to the compile flags.  Auto-defaults to
+  `OFF` when `BUILD_TESTING=ON` (strict IEEE so the convergence
+  test measures the real discretisation error) and `ON`
+  otherwise.  Either default can be overridden explicitly.  The
+  resolved value is printed at configure time so the developer
+  can't miss a mismatch.
+
+MPI and HDF5 are found via `find_package`; serial HDF5 is
+explicitly enough (per-rank files, no parallel-HDF5 dependency).
+The build is strictly out-of-tree; the test scripts get copied
+into `${CMAKE_CURRENT_BINARY_DIR}` at configure time so the
+historical `./test_X` working-directory convention still works
+inside the build tree.
+
+### Test suite
+
+15 CTest entries on the current `main`:
+
+* 8 operator-level tests in C: `test_domain_{2d,3d}` (decomposition
+  + sync), `test_child_{2d,3d}` (hierarchy construction),
+  `test_project_{2d,3d}` (injection at coincident points),
+  `test_prolong_{2d,3d}` (prolongation as a discrete identity),
+  `test_restrict_nl_{2d,3d}` + `test_prolong_nl_{2d,3d}`
+  (analytic-restriction / -prolongation of a known polynomial),
+  `test_restrict_cc_3d` + `test_prolong_cc_3d` (cc operators on a
+  known polynomial).  Each is run at multiple grid sizes and
+  np counts via the bash scripts.
+* 2 end-to-end tests: `test_parser` (driver refuses to start on
+  typo'd or out-of-range TOML keys), `test_make_xdmf` (driver
+  runs at np=2 → `scripts/make_xdmf.py` → validate the XMF parses
+  and the per-rank slabs assemble into the expected global
+  vertex count).
+* 5 convergence tests (one per BC preset) -- each runs the full
+  driver at N=32/64/128 on np=1 and np=8, parses the printed
+  $\|u - u_\star\|_\infty$, and asserts rate $\in [1.8, 2.3]$ on
+  the finest pair.
+
+The convergence tests are particularly valuable: they catch
+regressions that pure operator-level tests cannot (e.g. the
+hybrid-axis prolongation bug fixed in the recent work would have
+passed every operator test but produced wrong convergence rates,
+exactly what the convergence test would have caught).
+
+Verifiers are factored sensibly: `h5read.load_rank` reads a
+per-rank HDF5 file and returns a dict whose keys mirror the
+legacy JSON field names, so the four field-comparing verifiers
+(`verify.py`, `verify_zeros.py`, `verify_nl_restrict.py`,
+`verify_nl_prolong.py`) each contain only the math, not the I/O.
+
+### Documentation
+
+* **`doc/documentation.tex`** (21 pages) -- a real reference manual.
+  Sections cover the continuous problem; discretisation including a
+  TikZ figure showing the four axis layouts (D--D, N--N, D--N,
+  N--D); transfer operators with explicit per-layout formulas (the
+  full-weighting 27-point weights, the 8-point cc box-average, the
+  $(3/4, 1/4)$ cc trilinear, and the $(1/2, 1/2)$ hybrid-D-vertex
+  override); a guided tour of the implementation; and parameter /
+  tuning guidance.  The PDF rebuilds cleanly from source.
+* **`doc/tutorial.tex`** (8 pages) -- a follow-along guide to
+  adding a new BC preset.  Two worked examples (all-Dirichlet +
+  mixed), with copy-paste-ready C blocks for `problem_registry.c`
+  and matching TOMLs.  Calls out the outward-normal sign
+  convention for Neumann data as the "single most common gotcha".
+* **`Documentation.md`** -- a Markdown summary of the algorithm
+  and parameters, suitable for a project README.
+* **`CELL_CENTERED.md`** -- the side-by-side benchmark report
+  that motivated and justified the recent merge.
+* **`Plan.md`** -- running log of completed work and outstanding
+  issues, useful as project history.
+* **`src/CLAUDE.md`** -- developer-facing build / test / output
+  workflow notes.
+
+Public C/C++ functions in the project's own headers carry
+docstrings in a consistent "Purpose / Input / Output / Returns"
+format (see e.g. `domain.h:88` onward, `gauss_seidel.h:11`,
+`multigrid.h:7`).  Long algorithmic comments in `gauss_seidel.c`
+and `multigrid.c` explain non-obvious choices (the half-step on
+hybrid axes, the position-aware prolongation, the two-pass
+post-smoother) and reference textbook sections.
+
+### Safety
+
+* **`HDF5BinaryWrite` refuses to overwrite existing output files**
+  (`HDF5BinaryWrite.c:253`).  An accidental re-run with the same
+  `[output] dir` aborts with a clear diagnostic ("delete the file
+  or change `[output] dir`") rather than silently destroying the
+  prior solution.  `H5F_ACC_EXCL` makes HDF5 itself enforce the
+  no-clobber rule even under races.
+* **TOML allowlist validation** rejects typo'd keys.  A user who
+  writes `mulitgrid = true` gets a parser error rather than the
+  silent missing-key default.  Sections, keys, and value types are
+  all checked.
+* **64-bit / range-checked 32-bit integer helpers**
+  (`parameter.cc:35-60`).  A TOML value above INT_MAX bound for a
+  field declared `int` produces an explicit range error rather
+  than silently sign-flipping.
+
+---
+
+## Issues and recommended fixes
+
+Severity-ordered, highest first.  Per-item: **what** the issue is,
+**where** it lives, and a **suggested fix**.
+
+### 1. `manufactured_neumann_inhomog` -- V-cycle plateaus (known limitation)
+
+**What.**  The singular all-Neumann inhomogeneous preset is the
+one CTest convergence entry that does not pass.  The V-cycle's
+defect plateaus around $10^{-2}$ instead of reaching $10^{-9}$;
+the empirical rate caps at $\sim 1.7$--$1.88$, just below the
+$[1.8, 2.3]$ acceptance band.  The discretisation itself is
+rate-2 (matches the other Neumann-bearing presets); the missing
+rate is on the *iterative* side -- the V-cycle keeps injecting a
+constant-mode component that the per-iteration mean-zero
+projection then strips, so the defect oscillates around a
+non-zero stationary value rather than converging.
+
+**Where.**  The preset is registered in `problem_registry.c:322`
+but excluded from `CONVERGENCE_PRESETS` in
+`src/tests/CMakeLists.txt:60` (a clear comment explains why,
+`tests/CMakeLists.txt:67-80`).
+
+**Suggested fix.**  Either of:
+
+* **Krylov-accelerated coarse solve.**  Replace the bottom-grid
+  smoother iteration by a CG (or BiCGStab) inner solve that
+  projects against the null space.  ~50--100 lines of new code,
+  most of it boilerplate.
+* **Explicit null-space orthogonalisation inside `vcycle_3d`.**
+  After each smoother sweep on the singular level, project
+  VAR_DEF and VAR_SOL onto the orthogonal complement of the
+  constant mode.  Cheaper and more local, but harder to argue
+  the rate guarantee.
+
+This is the only outstanding correctness-adjacent gap.  Without
+it, the all-Neumann-inhomog problem is the one shape of input
+the solver doesn't fully handle.  If you don't need it, leaving
+it excluded is fine and the comment in `tests/CMakeLists.txt`
+already documents the limitation honestly.
+
+### 2. 2D code paths are atrophied
+
+**What.**  Every layer below the driver has a `_2d` companion to
+the `_3d` function (`setup_2d_domain`, `ngfs_2d_allocate`,
+`sync_var_2d`, `inject_var_2d`, `restrict_var_2d`,
+`prolong_var_2d`, `output_2d_gf`).  But:
+
+* `domain2d_st` (`domain.h:28`) carries **no per-face Neumann
+  flags** -- it predates the BC machinery and was never updated.
+* There is no `apply_bc_2d`, no `gauss_seidel_2d`, no
+  `calc_defect_2d`, no `vcycle_2d`.  The 2D infrastructure can
+  hold and move data but cannot solve anything.
+* `sync_var_2d` (`comm.c:27`) **duplicates** the per-axis
+  pack/MPI/unpack logic inline (~200 lines) instead of reusing
+  the `IndexBox` + `transfer_data` + `exchange_direction`
+  abstraction that the 3D version uses (`comm.c:294`).  Result:
+  two distinct sync implementations to keep in lock-step, even
+  though the 3D one would collapse to the 2D case when `nz = 1`.
+* `prolong_var_2d` (`multigrid.c:514`) unconditionally skips the
+  fine-grid boundary node.  In 3D the equivalent code reads
+  `parent->bc` and skips only Dirichlet faces; the 2D version
+  doesn't, because `domain2d_st` has no `bc` field.
+
+The 2D operator tests (`test_*_2d`) keep working because they
+don't exercise the BC machinery (they fill known polynomials and
+verify the operators' algebraic identities), but a user wanting
+to *solve* a 2D problem would have to write the solver itself.
+
+**Where.**  Throughout `src/`.
+
+**Suggested fix.**  Pick one of:
+
+* **Bring 2D up to parity with 3D.**  Add per-face Neumann flags
+  to `domain2d_st`, write `apply_bc_2d`, `gauss_seidel_2d`,
+  `calc_defect_2d`, `vcycle_2d`, and a `prolong_var_2d` /
+  `restrict_var_2d` cell-centred pair.  Substantial work but
+  uniformly mirrors the 3D code.
+* **Delete 2D entirely.**  The 3D path with `nz = 1` does what
+  most 2D code paths need.  Removes ~1000 lines, leaves the
+  operator-level 2D tests as the only thing to clean up.
+* **Make the 2D code 3D-derived.**  Rewrite `sync_var_2d` in
+  terms of `IndexBox` + `exchange_direction` (single-axis
+  collapse); document the rest as "data-structure only, no
+  solver".
+
+My recommendation is **delete 2D entirely** unless there is a
+near-term use for it.  The maintenance burden of two parallel
+implementations (one of which is a half-implementation) is
+non-trivial, and the operator-level tests that currently exercise
+the 2D code would all pass in 3D mode with `nz = 1`.
+
+### 3. `timer.{c,h}` is dead code
+
+**What.**  `register_timer`, `start_timer`, `stop_timer`,
+`print_timers` are defined in `src/timer.c` (197 lines), declared
+in `src/timer.h`, compiled into `multigrid_solver` (per
+`src/CMakeLists.txt:21`), linked into every binary, and
+**never called from anywhere in the project**.
+
+**Where.**  `src/timer.{c,h}`, listed at `src/CMakeLists.txt:21`.
+
+**Suggested fix.**  Either wire it in (the V-cycle is the
+natural use: register timers for "pre-smooth", "restrict",
+"prolong", "post-smooth", "defect", print at the end of the
+driver), or delete the file.  Either way removes dead code from
+the production binary.  My recommendation is to **wire it in** at
+the V-cycle level -- a per-phase breakdown is genuinely useful
+for tuning.
+
+### 4. `apply_bc_3d` is six near-clones of one operation
+
+**What.**  `gauss_seidel.c:95-383` -- ~290 lines covering one
+operation (write the boundary value or the Neumann mirror at one
+of the six faces) replicated per face with axis indices varying.
+Each face has the same structure: choose the BC kind, choose the
+callback (or NULL for homogeneous), compute the per-face
+boundary coordinate, write to the boundary slot or to the
+ghost slot.
+
+**Where.**  `src/gauss_seidel.c:95`.
+
+**Suggested fix.**  Factor the per-face body into a single helper
+parameterised by an axis enum (or a struct describing the face's
+geometry).  Roughly:
+
+```c
+struct face_geom {
+    int64_t lo_idx, hi_idx;   /* boundary slot, ghost slot, etc. */
+    int64_t stride;
+    int64_t n_outer, n_middle;
+    double  *coord_outer, *coord_middle;
+    double  delta, dh;        /* face-coordinate offset, axis spacing */
+    int     is_neumann_axis;
+};
+
+static void apply_face(struct ngfs_3d *gfs, face_id_t f,
+                       const struct face_geom *g, double *v);
+```
+
+Drops ~250 lines, makes the geometric decisions per-face explicit
+in one place, and the future addition of a Robin BC (`bc.h:11`
+already reserves the enum slot) becomes a single switch arm
+rather than six.
+
+### 5. `APPLY_SOR_3D` is a 65-line macro
+
+**What.**  `gauss_seidel.c:478-542` -- the per-cell SOR update is
+implemented as a `#define APPLY_SOR_3D` macro because it needs to
+be inlined into both the red and black sweep loops.  Sixty-five
+lines of backslash-continued C is hard to debug (no line info
+when stepping, hard-to-spot syntax errors, surprising scoping if
+the caller happens to use one of the locals), and the captured
+context (`x_lower_d_v`, `inv_dx2`, `nx`, `ny`, etc.) is implicit.
+
+**Where.**  `src/gauss_seidel.c:478`.
+
+**Suggested fix.**  Make it a `static inline` function that takes
+the captured context as a `const struct` parameter:
+
+```c
+struct sor_ctx {
+    double cx, cy, cz, cs;
+    double inv_dx2, inv_dy2, inv_dz2;
+    int64_t nx, ny, nz, stride_y, stride_z;
+    bool x_lower_d_v, x_upper_d_v, /* ... */;
+};
+
+static inline double sor_update_3d(int64_t idx, int64_t i, int64_t j,
+                                   int64_t k, const double *u,
+                                   const double *rhs,
+                                   const struct sor_ctx *ctx);
+```
+
+Modern compilers will inline this at `-O3` (it's already marked
+`static inline`); the function form gets real line numbers in
+gdb, real type-checking, and explicit closure.  The cost is one
+struct param.
+
+### 6. Repetitive 6-face Neumann ghost code in `apply_bc_3d`
+
+Tied to (4) above but separable: even within the Neumann branch
+of each face, the ghost-mirror loop is the same six times over,
+with the inner index swap (which axis is "interior", which is
+"ghost") being the only difference.  Same refactor as (4) covers
+this.
+
+### 7. `multigrid.toml` reference parameter file has stale defaults
+
+**What.**  `src/multigrid.toml` ships values from the *previous*
+solver tuning -- `omega = 1.5, n_smooth = 100, n_iters = 20,
+tol = 1.0e-9`.  After the cell-centred merge, the convergence
+test's tuned values are `omega = 1.5, n_smooth = 2, n_iters = 40,
+tol = 1.0e-12, min_cells = 2`.  A user copying `multigrid.toml`
+as a starting point will get either a slow solver
+(50× more sweeps than needed) or, in tighter cases, no
+convergence-to-tol.
+
+**Where.**  `src/multigrid.toml`.
+
+**Suggested fix.**  Update the sample file to match the
+convergence-test defaults.  Add comments explaining
+why each value is what it is (the convergence-test script's
+comments are a good template).
+
+### 8. `min_cells` default mismatch
+
+**What.**  Tied to (7).  `run_test_convergence.sh` uses
+`min_cells = 2` (necessary at np=8 with N=32 to get a deep enough
+hierarchy); `multigrid.toml` says `min_cells = 4`; the driver
+itself has no default.  A user with `min_cells = 4` and N=32 at
+np=8 will get the same V-cycle stall the convergence test was
+hitting before the comment in `run_test_convergence.sh`
+explained the fix.
+
+**Suggested fix.**  Make `min_cells = 2` the documented default
+in `multigrid.toml`, with the inline comment from the test
+script copied over.  Alternative: give `min_cells` a default in
+the parser (`multigrid_parameters.cc:88`) and warn if the value
+combined with the chosen `np` and `N` gives fewer than 4 levels.
+
+### 9. `LICENSE` is at `src/LICENSE`, not the repo root
+
+**What.**  `git ls-files | grep -i licen` returns `src/LICENSE`.
+GitHub, Zenodo, and most license-detection tooling look at the
+top level.  Putting LICENSE in `src/` is unusual and makes the
+project less obviously open-source.
+
+**Suggested fix.**  Move it to the repo root.  One-line `git mv`.
+
+### 10. `gf_indx_3d` takes a non-const pointer
+
+**What.**  `static inline int64_t gf_indx_3d(struct ngfs_3d *gfs, ...)`
+(`gf.h:126`) is a pure function (uses `gfs->nx`, `gfs->ny` to
+compute an index) but takes `struct ngfs_3d *` rather than
+`const struct ngfs_3d *`.  Forces callers that hold a const
+pointer to either cast away const or duplicate the formula
+inline.
+
+**Where.**  `src/gf.h:108`, `src/gf.h:126`.
+
+**Suggested fix.**  Change both prototypes (2d and 3d) to take a
+`const struct ngfs_*d *`.  No call site needs to be modified; the
+const propagation is purely additive.
+
+### 11. Two `name_length` macros at `20` and `1024` shadow each other
+
+**What.**  `src/gf.c:46` defines `name_length = 20` (the length of
+a variable-name buffer); `src/timer.c:25` defines `#define
+NAME_LENGTH 1024` (the length of a timer name).  They're in
+separate translation units so they don't actually conflict, but
+grepping the codebase for "NAME_LENGTH" returns both with no
+indication that one is per-variable and one is per-timer.
+
+**Suggested fix.**  Either remove `timer.c` (per item 3) or rename
+to `TIMER_NAME_LENGTH` to disambiguate.
+
+### 12. `HDF5BinaryWrite.c` `MAX_TRACKED = 32` could silently overflow
+
+**What.**  The "seen files" tracker (`HDF5BinaryWrite.c:227`)
+caps at 32 distinct filenames.  Past that, `mark_file_seen`
+silently returns (`HDF5BinaryWrite.c:241`), which would cause the
+*next* write to the 33rd filename to trigger the "refuse to
+overwrite" branch (which would abort).  In practice each rank
+writes one file, so this is fine.  But the silent return is
+worth a `fprintf(stderr, ...)` warning at least, so a future
+extension that writes many files doesn't get a confusing
+"refusing to overwrite" diagnostic on a file it just created.
+
+**Suggested fix.**  Either dynamic-allocate the tracker (no fixed
+cap), or print a warning when the cap is hit so failure is
+explicit.
+
+### 13. `TODO: FIX` markers in test_domain_{2d,3d}.c
+
+**What.**  `src/tests/test_domain_2d.c:53,61,155` and
+`src/tests/test_domain_3d.c:56,64,251` each carry `// TODO: FIX`
+comments without explaining what needs fixing.  Reading the code,
+the markers sit next to "the test arguments are invalid"
+diagnostics that call `MPI_Abort` -- so the TODOs are saying "do
+something nicer than MPI_Abort here" but never followed up.
+
+**Suggested fix.**  Either turn each marker into a specific
+recommendation ("validate args before MPI_Init so the abort
+message reaches the user shell instead of being swallowed by
+MPI"), or remove the markers.
+
+### 14. `prolong_var_2d` hard-codes Dirichlet skip
+
+**What.**  `multigrid.c:542,553` -- the 2D prolongation always
+skips the global-boundary fine-grid points.  In 3D the
+corresponding code (`multigrid.c:621-626`) reads `parent->bc` per
+face and skips only Dirichlet faces.  So 2D prolongation cannot
+handle a Neumann face even if `domain2d_st` were extended to
+carry the BC info.
+
+**Where.**  `src/multigrid.c:514`.
+
+**Suggested fix.**  Subsumed by item (2): if 2D is brought to
+parity with 3D, this gets fixed along with the rest; if 2D is
+deleted, it goes away.
+
+### 15. `verify_*.py` mixes 2D and 3D code paths via shape probing
+
+**What.**  Each verifier does `if local_data.ndim == 2:
+local_data = local_data.reshape((1,) + local_data.shape)` (e.g.
+`verify.py:75`) and elsewhere checks `is_3d = "nz" in d` or
+similar (`verify_zeros.py:34`).  The dual-purpose verifiers add
+real complexity to scripts whose job (compare against an analytic
+formula) is conceptually simple.
+
+**Where.**  All four field-comparing verifiers in
+`src/tests/`.
+
+**Suggested fix.**  Subsumed by item (2).  If 2D is deleted,
+each verifier becomes pure 3D and is meaningfully shorter.
+
+### 16. Driver only outputs `VAR_SOL`
+
+**What.**  `driver_multigrid.c:256` -- `output_3d_gf(&gfs, 0,
+param.output_dir)` writes only VAR_SOL.  The defect and RHS are
+in the same `ngfs_3d` but never written.  For
+debugging a stall the defect is exactly what you want to inspect.
+
+**Where.**  `src/driver_multigrid.c:256`.
+
+**Suggested fix.**  Trivial: add two more calls.  Maybe gate them
+behind a `[output] write_defect = true / write_rhs = true` pair
+of optional TOML keys.
+
+### 17. No CI configuration
+
+**What.**  No `.github/workflows/`, no GitLab CI YAML, no Jenkins
+config.  The test suite is comprehensive but only runs when a
+developer locally `ctest`s.
+
+**Suggested fix.**  Add a GitHub Actions workflow that runs
+`cmake -B build-test -DBUILD_TESTING=ON && cmake --build &&
+ctest` on every push.  ~30 lines of YAML.  Run on at least one
+Linux distro that ships HDF5 (Ubuntu LTS works); cache the apt
+install of `mpi-default-dev libhdf5-dev python3-h5py` so the
+job stays fast.
+
+### 18. `Boundary_plan.md` and `CellCentred_plan.md` are historical artefacts
+
+**What.**  Two design documents from before the cell-centred work
+landed.  Their content has been absorbed into the production code
+and `doc/documentation.tex`.
+
+**Where.**  Project root.
+
+**Suggested fix.**  Move into `doc/history/` or a separate
+`design/` subdirectory with a one-line README explaining they're
+preserved for project history.  Keeps the project root from
+showing two Plan-like files that aren't the active Plan.md.
+
+---
+
+## Recommendations (prioritised)
+
+If you want to ship a couple of improvements, here's the priority
+order:
+
+1. **Update `multigrid.toml` to the tuned cell-centred defaults**
+   (item 7 + 8).  Five minutes; fixes the most likely user-visible
+   surprise.  Critical for any new user.
+
+2. **Decide on the 2D code path** (item 2).  Either bring it to
+   parity or delete it.  The current half-state is the largest
+   single source of unhelpful complexity in the codebase.  My
+   recommendation: delete.
+
+3. **Wire `timer.{c,h}` into the V-cycle, or delete it** (item 3).
+   Either way removes the dead-code surface.
+
+4. **Refactor `apply_bc_3d` into a per-face helper** (item 4).
+   Halves the file, makes future Robin / periodic BCs a smaller
+   change, doesn't risk breaking anything covered by the test
+   suite.
+
+5. **Promote `APPLY_SOR_3D` from macro to `static inline`** (item
+   5).  Easier debugging; no performance impact at `-O3`.
+
+6. **Add CI** (item 17).  The test suite is good; have it run
+   automatically.
+
+7. **Tackle the singular all-Neumann limitation** (item 1).  Only
+   pursue if you have a use case that needs it -- the comment in
+   `tests/CMakeLists.txt` already documents the exclusion honestly,
+   which is acceptable for a teaching/research code.
+
+Items 9 (`LICENSE` location), 10 (`const`-ness), 11 (`NAME_LENGTH`
+shadowing), 12 (tracker cap), 13 (TODO markers), 16 (output more
+variables), and 18 (move historical plan docs) are minor polish
+worth doing if you're already touching the surrounding code.
+
+---
+
+## Conclusion
+
+This is one of the cleaner research codes I've reviewed.  The
+algorithmic core is correct, well-tested, and well-documented; the
+build / test / output infrastructure is solid; the recent
+cell-centred work made the solver substantially faster and more
+accurate without breaking anything.  The issues above are
+overwhelmingly tech debt rather than bugs -- code that works fine
+but could be tidier, smaller, or more uniform.  The one real
+correctness limitation (singular all-Neumann V-cycle plateau, item
+1) is honestly documented and excluded from the test suite rather
+than masked.
+
+The path from "good" to "great" runs through items 1--6 above,
+roughly in that order.
