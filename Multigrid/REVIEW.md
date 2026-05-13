@@ -312,40 +312,19 @@ solve.  Operator-level tests that never call
 overhead -- the wrappers are guarded on the per-timer ID being
 non-negative.
 
-### 4. `apply_bc_3d` is six near-clones of one operation
+### 4. `apply_bc_3d` is six near-clones of one operation (resolved)
 
-**What.**  `gauss_seidel.c:95-383` -- ~290 lines covering one
-operation (write the boundary value or the Neumann mirror at one
-of the six faces) replicated per face with axis indices varying.
-Each face has the same structure: choose the BC kind, choose the
-callback (or NULL for homogeneous), compute the per-face
-boundary coordinate, write to the boundary slot or to the
-ghost slot.
-
-**Where.**  `src/gauss_seidel.c:95`.
-
-**Suggested fix.**  Factor the per-face body into a single helper
-parameterised by an axis enum (or a struct describing the face's
-geometry).  Roughly:
-
-```c
-struct face_geom {
-    int64_t lo_idx, hi_idx;   /* boundary slot, ghost slot, etc. */
-    int64_t stride;
-    int64_t n_outer, n_middle;
-    double  *coord_outer, *coord_middle;
-    double  delta, dh;        /* face-coordinate offset, axis spacing */
-    int     is_neumann_axis;
-};
-
-static void apply_face(struct ngfs_3d *gfs, face_id_t f,
-                       const struct face_geom *g, double *v);
-```
-
-Drops ~250 lines, makes the geometric decisions per-face explicit
-in one place, and the future addition of a Robin BC (`bc.h:11`
-already reserves the enum slot) becomes a single switch arm
-rather than six.
+**Resolved** by factoring the per-face body into a single
+`apply_face_3d` helper parameterised by a `struct face_geom`
+(face id, axis 0/1/2, lower-vs-upper).  `apply_bc_3d` is now a
+21-line dispatcher that iterates the six face descriptors and
+skips faces whose owning rank has an MPI neighbour on that side.
+Net change: -163 lines in `src/gauss_seidel.c` (~56% reduction in
+the affected region).  All 15 CTest entries (including the
+mixed-BC convergence presets that exercise every Dirichlet /
+Neumann / hybrid combination on every face) still pass.  Adding
+a Robin BC -- the next likely BC extension -- is now a single
+switch arm inside `apply_face_3d`.
 
 ### 5. `APPLY_SOR_3D` is a 65-line macro
 
@@ -381,13 +360,10 @@ Modern compilers will inline this at `-O3` (it's already marked
 gdb, real type-checking, and explicit closure.  The cost is one
 struct param.
 
-### 6. Repetitive 6-face Neumann ghost code in `apply_bc_3d`
+### 6. Repetitive 6-face Neumann ghost code in `apply_bc_3d` (resolved)
 
-Tied to (4) above but separable: even within the Neumann branch
-of each face, the ghost-mirror loop is the same six times over,
-with the inner index swap (which axis is "interior", which is
-"ghost") being the only difference.  Same refactor as (4) covers
-this.
+**Resolved** as part of (4) -- the unified `apply_face_3d` helper
+now serves both Dirichlet and Neumann branches.
 
 ### 7. `multigrid.toml` reference parameter file has stale defaults (resolved)
 
@@ -543,9 +519,9 @@ order:
    (`NAME_LENGTH` shadow) is now disambiguatable on its own merits.
 
 4. **Refactor `apply_bc_3d` into a per-face helper** (item 4).
-   Halves the file, makes future Robin / periodic BCs a smaller
-   change, doesn't risk breaking anything covered by the test
-   suite.
+   **Done** -- six clones collapsed into a single `apply_face_3d`
+   helper plus a 21-line dispatcher; -163 lines in
+   `src/gauss_seidel.c`.
 
 5. **Promote `APPLY_SOR_3D` from macro to `static inline`** (item
    5).  Easier debugging; no performance impact at `-O3`.

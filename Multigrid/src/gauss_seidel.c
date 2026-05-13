@@ -54,6 +54,123 @@ static inline bc_fn_t face_value(const struct ngfs_3d *gfs, face_id_t f, int var
     return gfs->bc->face[f].value;
 }
 
+/* Per-face geometric descriptor consumed by apply_face_3d.
+ *
+ *   id        : enum identifying the face (used by callbacks).
+ *   axis      : 0=x, 1=y, 2=z -- which Cartesian axis is normal to the face.
+ *   is_upper  : false for the lower (i=0) end of `axis`, true for upper (i=N-1).
+ *
+ * The three pieces of metadata are enough to recover everything else
+ * apply_face_3d needs (boundary/interior indices, spacing, the two
+ * looped axes, the +/- h/2 vertex fix-up on hybrid axes) from gfs. */
+struct face_geom {
+    face_id_t id;
+    int       axis;
+    bool      is_upper;
+};
+
+/* Apply the BC for one physical-boundary face.  The face is identified
+ * by `g`; `gfs->bc` (queried via face_kind / face_value) decides
+ * whether it is Dirichlet (write the boundary vertex) or Neumann
+ * (write the ghost row via u_ghost = u_int + h*q).
+ *
+ * Dirichlet vertex coordinate on hybrid axes: an axis with at least
+ * one Neumann face has gfs->x0 shifted by -h/2 so the cell-centre
+ * formula x = x0 + i*dx is exact.  Dirichlet vertices sit at +/-h/2
+ * from that formula; the bdy_coord computation below adds the fix-up
+ * (sign = +1 at lower, -1 at upper).
+ *
+ * Neumann boundary-plane coordinate: the boundary plane lies at the
+ * midpoint of the ghost slot (i_bdy) and the first interior cell
+ * centre (i_int).  Phase 6.2B attempted a 4-point higher-order ghost
+ * extrapolation here but it made the matrix non-M (negative
+ * off-diagonal on u_3) and SOR with omega=1.5 diverged on it; the
+ * cell-centred mirror is the supported approach. */
+static void apply_face_3d(struct ngfs_3d *gfs, int var,
+                          const struct face_geom *g)
+{
+    /* Pull axis-dependent geometry. */
+    int64_t nax, n_outer, n_middle;
+    double  dax, a0, out0, dout, mid0, dmid;
+    bool    axis_has_neu;
+
+    switch (g->axis) {
+        case 0:
+            nax  = gfs->nx; dax = gfs->dx; a0   = gfs->x0;
+            n_outer  = gfs->nz; out0 = gfs->z0; dout = gfs->dz;
+            n_middle = gfs->ny; mid0 = gfs->y0; dmid = gfs->dy;
+            axis_has_neu = axis_x_neumann(gfs);
+            break;
+        case 1:
+            nax  = gfs->ny; dax = gfs->dy; a0   = gfs->y0;
+            n_outer  = gfs->nz; out0 = gfs->z0; dout = gfs->dz;
+            n_middle = gfs->nx; mid0 = gfs->x0; dmid = gfs->dx;
+            axis_has_neu = axis_y_neumann(gfs);
+            break;
+        default:  /* 2 */
+            nax  = gfs->nz; dax = gfs->dz; a0   = gfs->z0;
+            n_outer  = gfs->ny; out0 = gfs->y0; dout = gfs->dy;
+            n_middle = gfs->nx; mid0 = gfs->x0; dmid = gfs->dx;
+            axis_has_neu = axis_z_neumann(gfs);
+            break;
+    }
+
+    const int64_t i_bdy = g->is_upper ? (nax - 1) : 0;
+    const int64_t i_int = g->is_upper ? (nax - 2) : 1;
+    const double  sign  = g->is_upper ? -1.0 : +1.0;  /* outward direction */
+    const double  half  = 0.5 * dax;
+
+    const bc_kind_t kind = face_kind(gfs, g->id);
+    const bc_fn_t   cb   = face_value(gfs, g->id, var);
+    const face_id_t f    = g->id;
+
+    /* face_coord: x|y|z value passed to the callback.
+     *   Dirichlet: physical position of the boundary vertex.
+     *   Neumann:   physical position of the boundary plane (mirror midpoint). */
+    const double face_coord =
+        a0 + (double)i_bdy * dax
+        + sign * ((kind == BC_DIRICHLET && !axis_has_neu) ? 0.0 : half);
+
+    double *v = gfs->vars[var]->val;
+
+    /* Sweep the two axes other than `g->axis`.
+     *   axis=0 (x-face): outer=k, middle=j -> (x, y, z) = (face, middle, outer)
+     *   axis=1 (y-face): outer=k, middle=i -> (x, y, z) = (middle, face, outer)
+     *   axis=2 (z-face): outer=j, middle=i -> (x, y, z) = (middle, outer, face)
+     * The choice puts the i axis in the inner loop where it gives a
+     * unit-stride access through gf_indx_3d (i fastest-varying). */
+    for (int64_t o = 0; o < n_outer; o++) {
+        const double coord_outer  = out0 + (double)o * dout;
+        for (int64_t m = 0; m < n_middle; m++) {
+            const double coord_middle = mid0 + (double)m * dmid;
+
+            int64_t idx_bdy, idx_int;
+            double  x, y, z;
+            switch (g->axis) {
+                case 0:
+                    idx_bdy = gf_indx_3d(gfs, i_bdy, m, o);
+                    idx_int = gf_indx_3d(gfs, i_int, m, o);
+                    x = face_coord;   y = coord_middle; z = coord_outer; break;
+                case 1:
+                    idx_bdy = gf_indx_3d(gfs, m, i_bdy, o);
+                    idx_int = gf_indx_3d(gfs, m, i_int, o);
+                    x = coord_middle; y = face_coord;   z = coord_outer; break;
+                default:  /* 2 */
+                    idx_bdy = gf_indx_3d(gfs, m, o, i_bdy);
+                    idx_int = gf_indx_3d(gfs, m, o, i_int);
+                    x = coord_middle; y = coord_outer; z = face_coord;   break;
+            }
+
+            if (kind == BC_DIRICHLET) {
+                v[idx_bdy] = cb ? cb(x, y, z, f) : 0.0;
+            } else {
+                const double q = cb ? cb(x, y, z, f) : 0.0;
+                v[idx_bdy] = v[idx_int] + dax * q;
+            }
+        }
+    }
+}
+
 /******************************************************************
 * Purpose: Apply per-face boundary conditions to variable `var` at every
 *     physical-boundary face owned by this rank.  A face is a physical
@@ -64,21 +181,9 @@ static inline bc_fn_t face_value(const struct ngfs_3d *gfs, face_id_t f, int var
 *     Behaviour per face is determined by gfs->bc:
 *       * Dirichlet: the boundary node (i=0 or i=nx-1 on a pure D-D
 *         axis, or i=0 / i=nx-1 on the D end of a hybrid D-N / N-D
-*         axis) is *written* with the prescribed value g(x,y,z).  On
-*         hybrid axes the vertex's physical coordinate is shifted by
-*         +/-h/2 from the standard x = gfs->x0 + i*dx formula
-*         (because the axis is shifted by -h/2 to give correct cell
-*         coordinates) -- the writes below add the +/-h/2 fix-up.
-*         When the face is homogeneous (or var != VAR_SOL, since the
-*         defect carries no inhomogeneous data of its own) the value
-*         is 0; otherwise the per-face callback supplies u(x,y,z).
+*         axis) is *written* with the prescribed value g(x,y,z).
 *       * Neumann: the ghost row at i=0 (lower) or i=nx-1 (upper) is
-*         written via the cell-centred mirror u_ghost = u_int + h*q,
-*         where q is the user's outward-normal-derivative callback
-*         and h is the per-axis spacing.  The boundary plane lies at
-*         the midpoint of the ghost and the first interior cell
-*         centre -- coordinate gfs->x0 + h/2 (lower) or gfs->x0 +
-*         (nx-1)*dx - h/2 (upper).
+*         written via the cell-centred mirror u_ghost = u_int + h*q.
 *
 *     When gfs->bc == NULL, every face defaults to homogeneous
 *     Dirichlet -- the historical behaviour that operator-level unit
@@ -94,291 +199,23 @@ static inline bc_fn_t face_value(const struct ngfs_3d *gfs, face_id_t f, int var
 *******************************************************************/
 void apply_bc_3d(struct ngfs_3d *gfs, int var)
 {
-    double *v  = gfs->vars[var]->val;
-    const int64_t nx = gfs->nx;
-    const int64_t ny = gfs->ny;
-    const int64_t nz = gfs->nz;
+    static const struct face_geom faces[6] = {
+        { FACE_LOWER_X, 0, false },
+        { FACE_UPPER_X, 0, true  },
+        { FACE_LOWER_Y, 1, false },
+        { FACE_UPPER_Y, 1, true  },
+        { FACE_LOWER_Z, 2, false },
+        { FACE_UPPER_Z, 2, true  },
+    };
+    const int neighbour_rank[6] = {
+        gfs->domain.lower_x_rank, gfs->domain.upper_x_rank,
+        gfs->domain.lower_y_rank, gfs->domain.upper_y_rank,
+        gfs->domain.lower_z_rank, gfs->domain.upper_z_rank,
+    };
 
-    /* Phase 3 unification: every Neumann face -- whether the axis is
-     * pure N-N, hybrid D-N, or hybrid N-D -- is treated the same way.
-     * apply_bc_3d writes the ghost row via u_ghost = u_int + h*q.
-     *
-     * The axis-shifted-or-not flag controls *coordinate* fix-ups:
-     * - When the axis has at least one Neumann face, gfs->x0 is
-     *   shifted by -h/2 so that the standard formula x = x0 + i*dx
-     *   gives correct cell-centre coordinates.  Dirichlet vertices
-     *   on hybrid axes are at i=0 (D-N) or i=nx-1 (N-D) but their
-     *   *physical* position is at +/-h/2 from the formula's
-     *   prediction; the writes below add the +/-h/2 fix-up.
-     * - When the axis is pure D-D, gfs->x0 is at the box edge and
-     *   the formula is exact for both vertices. */
-    const bool x_neumann_axis = axis_x_neumann(gfs);
-    const bool y_neumann_axis = axis_y_neumann(gfs);
-    const bool z_neumann_axis = axis_z_neumann(gfs);
-
-    /* Lower-x face: i = 0 */
-    if (gfs->domain.lower_x_rank == INVALID_RANK)
-    {
-        const face_id_t f = FACE_LOWER_X;
-        if (face_kind(gfs, f) == BC_DIRICHLET)
-        {
-            /* Vertex at i=0.  Pure DD: coord is gfs->x0 = a.  D-N:
-             * gfs->x0 = a-h/2 (shifted), so vertex coord = a = x0 + h/2. */
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  x  = gfs->x0 + (x_neumann_axis ? 0.5 * gfs->dx : 0.0);
-            if (cb)
-            {
-                for (int k = 0; k < nz; k++) {
-                    const double z = gfs->z0 + k * gfs->dz;
-                    for (int j = 0; j < ny; j++) {
-                        const double y = gfs->y0 + j * gfs->dy;
-                        v[gf_indx_3d(gfs, 0, j, k)] = cb(x, y, z, f);
-                    }
-                }
-            }
-            else
-            {
-                for (int k = 0; k < nz; k++)
-                    for (int j = 0; j < ny; j++)
-                        v[gf_indx_3d(gfs, 0, j, k)] = 0.0;
-            }
-        }
-        else
-        {
-            /* Cell-centred Neumann ghost: write u[0] = u[1] + h*q.
-             * Phase 6.2B attempted the 4-point higher-order
-             * extrapolation here but it makes the matrix non-M
-             * (negative off-diagonal -1/23 on u_3) and SOR with
-             * omega=1.5 diverges on it; reverted. */
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  x_bdy = gfs->x0 + 0.5 * gfs->dx;
-            for (int k = 0; k < nz; k++) {
-                const double z = gfs->z0 + k * gfs->dz;
-                for (int j = 0; j < ny; j++) {
-                    const double y = gfs->y0 + j * gfs->dy;
-                    const double q = cb ? cb(x_bdy, y, z, f) : 0.0;
-                    const int64_t i0 = gf_indx_3d(gfs, 0, j, k);
-                    const int64_t i1 = gf_indx_3d(gfs, 1, j, k);
-                    v[i0] = v[i1] + gfs->dx * q;
-                }
-            }
-        }
-    }
-
-    /* Upper-x face: i = nx-1 */
-    if (gfs->domain.upper_x_rank == INVALID_RANK)
-    {
-        const face_id_t f = FACE_UPPER_X;
-        if (face_kind(gfs, f) == BC_DIRICHLET)
-        {
-            /* Vertex at i=nx-1.  Pure DD: coord = x0 + (nx-1)*dx = b.
-             * N-D: x0 + (nx-1)*dx = b+h/2, so vertex coord = b = ... - h/2. */
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  x  = gfs->x0 + (nx - 1) * gfs->dx
-                             - (x_neumann_axis ? 0.5 * gfs->dx : 0.0);
-            if (cb)
-            {
-                for (int k = 0; k < nz; k++) {
-                    const double z = gfs->z0 + k * gfs->dz;
-                    for (int j = 0; j < ny; j++) {
-                        const double y = gfs->y0 + j * gfs->dy;
-                        v[gf_indx_3d(gfs, nx - 1, j, k)] = cb(x, y, z, f);
-                    }
-                }
-            }
-            else
-            {
-                for (int k = 0; k < nz; k++)
-                    for (int j = 0; j < ny; j++)
-                        v[gf_indx_3d(gfs, nx - 1, j, k)] = 0.0;
-            }
-        }
-        else
-        {
-            /* Cell-centred Neumann ghost: u[nx-1] = u[nx-2] + h*q. */
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  x_bdy = gfs->x0 + (nx - 1) * gfs->dx - 0.5 * gfs->dx;
-            for (int k = 0; k < nz; k++) {
-                const double z = gfs->z0 + k * gfs->dz;
-                for (int j = 0; j < ny; j++) {
-                    const double y = gfs->y0 + j * gfs->dy;
-                    const double q = cb ? cb(x_bdy, y, z, f) : 0.0;
-                    const int64_t in_1 = gf_indx_3d(gfs, nx - 1, j, k);
-                    const int64_t in_2 = gf_indx_3d(gfs, nx - 2, j, k);
-                    v[in_1] = v[in_2] + gfs->dx * q;
-                }
-            }
-        }
-    }
-
-    /* Lower-y face: j = 0 */
-    if (gfs->domain.lower_y_rank == INVALID_RANK)
-    {
-        const face_id_t f = FACE_LOWER_Y;
-        if (face_kind(gfs, f) == BC_DIRICHLET)
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  y  = gfs->y0 + (y_neumann_axis ? 0.5 * gfs->dy : 0.0);
-            if (cb)
-            {
-                for (int k = 0; k < nz; k++) {
-                    const double z = gfs->z0 + k * gfs->dz;
-                    for (int i = 0; i < nx; i++) {
-                        const double x = gfs->x0 + i * gfs->dx;
-                        v[gf_indx_3d(gfs, i, 0, k)] = cb(x, y, z, f);
-                    }
-                }
-            }
-            else
-            {
-                for (int k = 0; k < nz; k++)
-                    for (int i = 0; i < nx; i++)
-                        v[gf_indx_3d(gfs, i, 0, k)] = 0.0;
-            }
-        }
-        else
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  y_bdy = gfs->y0 + 0.5 * gfs->dy;
-            for (int k = 0; k < nz; k++) {
-                const double z = gfs->z0 + k * gfs->dz;
-                for (int i = 0; i < nx; i++) {
-                    const double x = gfs->x0 + i * gfs->dx;
-                    const double q = cb ? cb(x, y_bdy, z, f) : 0.0;
-                    const int64_t j0 = gf_indx_3d(gfs, i, 0, k);
-                    const int64_t j1 = gf_indx_3d(gfs, i, 1, k);
-                    v[j0] = v[j1] + gfs->dy * q;
-                }
-            }
-        }
-    }
-
-    /* Upper-y face: j = ny-1 */
-    if (gfs->domain.upper_y_rank == INVALID_RANK)
-    {
-        const face_id_t f = FACE_UPPER_Y;
-        if (face_kind(gfs, f) == BC_DIRICHLET)
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  y  = gfs->y0 + (ny - 1) * gfs->dy
-                             - (y_neumann_axis ? 0.5 * gfs->dy : 0.0);
-            if (cb)
-            {
-                for (int k = 0; k < nz; k++) {
-                    const double z = gfs->z0 + k * gfs->dz;
-                    for (int i = 0; i < nx; i++) {
-                        const double x = gfs->x0 + i * gfs->dx;
-                        v[gf_indx_3d(gfs, i, ny - 1, k)] = cb(x, y, z, f);
-                    }
-                }
-            }
-            else
-            {
-                for (int k = 0; k < nz; k++)
-                    for (int i = 0; i < nx; i++)
-                        v[gf_indx_3d(gfs, i, ny - 1, k)] = 0.0;
-            }
-        }
-        else
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  y_bdy = gfs->y0 + (ny - 1) * gfs->dy - 0.5 * gfs->dy;
-            for (int k = 0; k < nz; k++) {
-                const double z = gfs->z0 + k * gfs->dz;
-                for (int i = 0; i < nx; i++) {
-                    const double x = gfs->x0 + i * gfs->dx;
-                    const double q = cb ? cb(x, y_bdy, z, f) : 0.0;
-                    const int64_t jn_1 = gf_indx_3d(gfs, i, ny - 1, k);
-                    const int64_t jn_2 = gf_indx_3d(gfs, i, ny - 2, k);
-                    v[jn_1] = v[jn_2] + gfs->dy * q;
-                }
-            }
-        }
-    }
-
-    /* Lower-z face: k = 0 */
-    if (gfs->domain.lower_z_rank == INVALID_RANK)
-    {
-        const face_id_t f = FACE_LOWER_Z;
-        if (face_kind(gfs, f) == BC_DIRICHLET)
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  z  = gfs->z0 + (z_neumann_axis ? 0.5 * gfs->dz : 0.0);
-            if (cb)
-            {
-                for (int j = 0; j < ny; j++) {
-                    const double y = gfs->y0 + j * gfs->dy;
-                    for (int i = 0; i < nx; i++) {
-                        const double x = gfs->x0 + i * gfs->dx;
-                        v[gf_indx_3d(gfs, i, j, 0)] = cb(x, y, z, f);
-                    }
-                }
-            }
-            else
-            {
-                for (int j = 0; j < ny; j++)
-                    for (int i = 0; i < nx; i++)
-                        v[gf_indx_3d(gfs, i, j, 0)] = 0.0;
-            }
-        }
-        else
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  z_bdy = gfs->z0 + 0.5 * gfs->dz;
-            for (int j = 0; j < ny; j++) {
-                const double y = gfs->y0 + j * gfs->dy;
-                for (int i = 0; i < nx; i++) {
-                    const double x = gfs->x0 + i * gfs->dx;
-                    const double q = cb ? cb(x, y, z_bdy, f) : 0.0;
-                    const int64_t k0 = gf_indx_3d(gfs, i, j, 0);
-                    const int64_t k1 = gf_indx_3d(gfs, i, j, 1);
-                    v[k0] = v[k1] + gfs->dz * q;
-                }
-            }
-        }
-    }
-
-    /* Upper-z face: k = nz-1 */
-    if (gfs->domain.upper_z_rank == INVALID_RANK)
-    {
-        const face_id_t f = FACE_UPPER_Z;
-        if (face_kind(gfs, f) == BC_DIRICHLET)
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  z  = gfs->z0 + (nz - 1) * gfs->dz
-                             - (z_neumann_axis ? 0.5 * gfs->dz : 0.0);
-            if (cb)
-            {
-                for (int j = 0; j < ny; j++) {
-                    const double y = gfs->y0 + j * gfs->dy;
-                    for (int i = 0; i < nx; i++) {
-                        const double x = gfs->x0 + i * gfs->dx;
-                        v[gf_indx_3d(gfs, i, j, nz - 1)] = cb(x, y, z, f);
-                    }
-                }
-            }
-            else
-            {
-                for (int j = 0; j < ny; j++)
-                    for (int i = 0; i < nx; i++)
-                        v[gf_indx_3d(gfs, i, j, nz - 1)] = 0.0;
-            }
-        }
-        else
-        {
-            const bc_fn_t cb = face_value(gfs, f, var);
-            const double  z_bdy = gfs->z0 + (nz - 1) * gfs->dz - 0.5 * gfs->dz;
-            for (int j = 0; j < ny; j++) {
-                const double y = gfs->y0 + j * gfs->dy;
-                for (int i = 0; i < nx; i++) {
-                    const double x = gfs->x0 + i * gfs->dx;
-                    const double q = cb ? cb(x, y, z_bdy, f) : 0.0;
-                    const int64_t kn_1 = gf_indx_3d(gfs, i, j, nz - 1);
-                    const int64_t kn_2 = gf_indx_3d(gfs, i, j, nz - 2);
-                    v[kn_1] = v[kn_2] + gfs->dz * q;
-                }
-            }
-        }
+    for (int i = 0; i < 6; i++) {
+        if (neighbour_rank[i] == INVALID_RANK)
+            apply_face_3d(gfs, var, &faces[i]);
     }
 }
 
