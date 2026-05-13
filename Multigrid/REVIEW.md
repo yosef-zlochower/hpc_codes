@@ -326,39 +326,18 @@ Neumann / hybrid combination on every face) still pass.  Adding
 a Robin BC -- the next likely BC extension -- is now a single
 switch arm inside `apply_face_3d`.
 
-### 5. `APPLY_SOR_3D` is a 65-line macro
+### 5. `APPLY_SOR_3D` is a 65-line macro (resolved)
 
-**What.**  `gauss_seidel.c:478-542` -- the per-cell SOR update is
-implemented as a `#define APPLY_SOR_3D` macro because it needs to
-be inlined into both the red and black sweep loops.  Sixty-five
-lines of backslash-continued C is hard to debug (no line info
-when stepping, hard-to-spot syntax errors, surprising scoping if
-the caller happens to use one of the locals), and the captured
-context (`x_lower_d_v`, `inv_dx2`, `nx`, `ny`, etc.) is implicit.
-
-**Where.**  `src/gauss_seidel.c:478`.
-
-**Suggested fix.**  Make it a `static inline` function that takes
-the captured context as a `const struct` parameter:
-
-```c
-struct sor_ctx {
-    double cx, cy, cz, cs;
-    double inv_dx2, inv_dy2, inv_dz2;
-    int64_t nx, ny, nz, stride_y, stride_z;
-    bool x_lower_d_v, x_upper_d_v, /* ... */;
-};
-
-static inline double sor_update_3d(int64_t idx, int64_t i, int64_t j,
-                                   int64_t k, const double *u,
-                                   const double *rhs,
-                                   const struct sor_ctx *ctx);
-```
-
-Modern compilers will inline this at `-O3` (it's already marked
-`static inline`); the function form gets real line numbers in
-gdb, real type-checking, and explicit closure.  The cost is one
-struct param.
+**Resolved** by promoting the macro to a `static inline void
+sor_update_3d(idx, i, j, k, const struct sor_ctx_3d *c)` function.
+The captured context (data pointers, fast/slow-path stencil
+weights, hybrid-axis Dirichlet-vertex flags, omega) is bundled
+into `struct sor_ctx_3d` and constructed once at the top of
+`gauss_seidel_3d`.  Convergence rates on all five BC presets
+still land in `[1.8, 2.3]` at np=1 and np=8 and end-to-end suite
+runtime is unchanged within noise (~93s), so the inline expands
+to the same codegen as the macro at -O3.  The function form
+gives real gdb line numbers and type checking.
 
 ### 6. Repetitive 6-face Neumann ghost code in `apply_bc_3d` (resolved)
 
@@ -524,7 +503,9 @@ order:
    `src/gauss_seidel.c`.
 
 5. **Promote `APPLY_SOR_3D` from macro to `static inline`** (item
-   5).  Easier debugging; no performance impact at `-O3`.
+   5).  **Done** -- macro replaced by `static inline
+   sor_update_3d` with the captured context bundled into
+   `struct sor_ctx_3d`.  No runtime regression.
 
 6. **Add CI** (item 17).  The test suite is good; have it run
    automatically.

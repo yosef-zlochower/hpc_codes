@@ -240,6 +240,115 @@ void apply_bc_3d(struct ngfs_3d *gfs, int var)
 *     void. Side effects: calls sync_var_3d and apply_bc_3d after each
 *     half-sweep.
 *******************************************************************/
+/* All inputs to the per-cell SOR update, packed so the kernel can be
+ * lifted out of gauss_seidel_3d into a static inline function (the
+ * data pointers, the precomputed stencil weights, the per-axis hybrid
+ * Dirichlet-vertex flags, and the relaxation parameter). */
+struct sor_ctx_3d {
+    double       *u;          /* solution buffer (read+write)                */
+    const double *rhs;        /* source term (read only)                     */
+
+    int64_t nx, ny, nz;       /* local extents incl. ghosts                  */
+    int64_t stride_y;         /* gf_indx_3d j-stride: nx                     */
+    int64_t stride_z;         /* gf_indx_3d k-stride: nx * ny                */
+
+    double cx, cy, cz, cs;    /* fast-path stencil weights (per-axis + src)  */
+    double inv_dx2, inv_dy2, inv_dz2;  /* slow-path inverse spacings         */
+
+    double omega;             /* SOR relaxation parameter                    */
+
+    /* "Hybrid-Dirichlet-vertex on this end of this axis?" flags.  Set
+     * iff the rank owns the physical face, the face is Dirichlet, and
+     * the opposite face on the same axis is Neumann.  The slow path
+     * (4-point Lagrange stencil) triggers at i in {1, nx-2} on the
+     * affected axis. */
+    bool x_lower_d_v, x_upper_d_v;
+    bool y_lower_d_v, y_upper_d_v;
+    bool z_lower_d_v, z_upper_d_v;
+};
+
+/* Compute and apply the SOR update at one cell, including the per-axis
+ * non-uniform stencil at cells adjacent to a hybrid Dirichlet vertex
+ * (the gap on the D side is h/2, not h).  Most cells take the fast
+ * path (precomputed cx, cy, cz, cs).  The slow path is triggered only
+ * at i in {1, nx-2} on a hybrid x axis, etc. -- O(N^2) cells out of
+ * O(N^3) -- so the branch is well predicted.
+ *
+ * Marked static inline so the compiler folds the function body into
+ * both red and black sweep loops with no call overhead at -O3. */
+static inline void sor_update_3d(int64_t idx, int64_t i, int64_t j, int64_t k,
+                                 const struct sor_ctx_3d *c)
+{
+    const double u_xm = c->u[idx - 1];
+    const double u_xp = c->u[idx + 1];
+    const double u_ym = c->u[idx - c->stride_y];
+    const double u_yp = c->u[idx + c->stride_y];
+    const double u_zm = c->u[idx - c->stride_z];
+    const double u_zp = c->u[idx + c->stride_z];
+
+    const bool x_sp = (i == 1 && c->x_lower_d_v) || (i == c->nx - 2 && c->x_upper_d_v);
+    const bool y_sp = (j == 1 && c->y_lower_d_v) || (j == c->ny - 2 && c->y_upper_d_v);
+    const bool z_sp = (k == 1 && c->z_lower_d_v) || (k == c->nz - 2 && c->z_upper_d_v);
+
+    double u_new;
+    if (!x_sp && !y_sp && !z_sp)
+    {
+        u_new = c->cx * (u_xp + u_xm) + c->cy * (u_yp + u_ym)
+              + c->cz * (u_zp + u_zm) - c->cs * c->rhs[idx];
+    }
+    else
+    {
+        /* Phase 6.2 4-point Lagrange stencil at the cell adjacent to a
+         * hybrid Dirichlet vertex.  Cubic Lagrange-extrapolate a virtual
+         * ghost u(-h/2) through the four points (u_v, u_self, u_far,
+         * u_far_far), then plug into the standard centred Laplacian.
+         * Result (lower D side, i=1):
+         *   u_xx ~= (1/(5 h^2))(16 u_v - 25 u_self + 10 u_far - u_far_far).
+         * O(h^2) Laplacian truncation -> rate 2 globally (vs. the O(h)
+         * of the Phase 3 3-point form).  No q-coefficient, so the
+         * discrete compatibility is unaffected (the Phase 5 concern
+         * was specific to the Neumann ghost variant). */
+        double diag_x = 2.0, off_x = u_xm + u_xp;
+        if (x_sp) {
+            diag_x = 5.0;
+            if (i == 1) {
+                const double u_ff = c->u[idx + 2];
+                off_x = (16.0/5.0) * u_xm + 2.0 * u_xp - (1.0/5.0) * u_ff;
+            } else {
+                const double u_ff = c->u[idx - 2];
+                off_x = (16.0/5.0) * u_xp + 2.0 * u_xm - (1.0/5.0) * u_ff;
+            }
+        }
+        double diag_y = 2.0, off_y = u_ym + u_yp;
+        if (y_sp) {
+            diag_y = 5.0;
+            if (j == 1) {
+                const double u_ff = c->u[idx + 2 * c->stride_y];
+                off_y = (16.0/5.0) * u_ym + 2.0 * u_yp - (1.0/5.0) * u_ff;
+            } else {
+                const double u_ff = c->u[idx - 2 * c->stride_y];
+                off_y = (16.0/5.0) * u_yp + 2.0 * u_ym - (1.0/5.0) * u_ff;
+            }
+        }
+        double diag_z = 2.0, off_z = u_zm + u_zp;
+        if (z_sp) {
+            diag_z = 5.0;
+            if (k == 1) {
+                const double u_ff = c->u[idx + 2 * c->stride_z];
+                off_z = (16.0/5.0) * u_zm + 2.0 * u_zp - (1.0/5.0) * u_ff;
+            } else {
+                const double u_ff = c->u[idx - 2 * c->stride_z];
+                off_z = (16.0/5.0) * u_zp + 2.0 * u_zm - (1.0/5.0) * u_ff;
+            }
+        }
+        const double diag = diag_x * c->inv_dx2 + diag_y * c->inv_dy2 + diag_z * c->inv_dz2;
+        const double off  = off_x  * c->inv_dx2 + off_y  * c->inv_dy2 + off_z  * c->inv_dz2;
+        u_new = (off - c->rhs[idx]) / diag;
+    }
+
+    c->u[idx] = (1.0 - c->omega) * c->u[idx] + c->omega * u_new;
+}
+
 void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
 {
     const int     gs = gfs->gs;
@@ -255,17 +364,6 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
     const double dx2dz2 = dx2 * dz2;
     const double dy2dz2 = dy2 * dz2;
     const double denom  = 2.0 * (dx2dy2 + dx2dz2 + dy2dz2);
-    const double cx = dy2dz2 / denom;   /* weight for u[i±1, j, k] */
-    const double cy = dx2dz2 / denom;   /* weight for u[i, j±1, k] */
-    const double cz = dx2dy2 / denom;   /* weight for u[i, j, k±1] */
-    const double cs = dx2dy2 * dz2 / denom; /* weight for source   */
-
-    /* Index strides matching gf_indx_3d: idx = i + (j + k*ny)*nx */
-    const int64_t stride_y = nx;
-    const int64_t stride_z = nx * ny;
-
-    double *u   = gfs->vars[VAR_SOL]->val;
-    double *rhs = gfs->vars[VAR_RHS]->val;
 
     /* Global index offsets: global_i = local_i0 + i  (similarly j, k) */
     const int64_t local_i0 = gfs->domain.local_i0;
@@ -279,104 +377,47 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
     /* Hybrid axis flags: a hybrid axis has D on one end and N on
      * the other.  At the cell adjacent to the D vertex the gap to
      * the vertex is h/2 rather than h, and the standard 7-point
-     * stencil is replaced on that axis by the non-uniform formula
-     *   u_xx ~= (4/(3 h^2)) * (2 u_v - 3 u_self + u_far).
-     * (CellCentred_plan.md sec. 4.2.) */
-    const bool x_lower_d_v = (gfs->domain.lower_x_rank == INVALID_RANK)
-                          && !gfs->domain.neumann_lower_x
-                          &&  gfs->domain.neumann_upper_x;
-    const bool x_upper_d_v = (gfs->domain.upper_x_rank == INVALID_RANK)
-                          &&  gfs->domain.neumann_lower_x
-                          && !gfs->domain.neumann_upper_x;
-    const bool y_lower_d_v = (gfs->domain.lower_y_rank == INVALID_RANK)
-                          && !gfs->domain.neumann_lower_y
-                          &&  gfs->domain.neumann_upper_y;
-    const bool y_upper_d_v = (gfs->domain.upper_y_rank == INVALID_RANK)
-                          &&  gfs->domain.neumann_lower_y
-                          && !gfs->domain.neumann_upper_y;
-    const bool z_lower_d_v = (gfs->domain.lower_z_rank == INVALID_RANK)
-                          && !gfs->domain.neumann_lower_z
-                          &&  gfs->domain.neumann_upper_z;
-    const bool z_upper_d_v = (gfs->domain.upper_z_rank == INVALID_RANK)
-                          &&  gfs->domain.neumann_lower_z
-                          && !gfs->domain.neumann_upper_z;
+     * stencil is replaced on that axis by the 4-point Lagrange form
+     * (CellCentred_plan.md sec. 4.2). */
+    const struct sor_ctx_3d ctx = {
+        .u   = gfs->vars[VAR_SOL]->val,
+        .rhs = gfs->vars[VAR_RHS]->val,
 
-    /* Inverse-h^2 constants for the non-uniform stencil's slow path. */
-    const double inv_dx2 = 1.0 / dx2;
-    const double inv_dy2 = 1.0 / dy2;
-    const double inv_dz2 = 1.0 / dz2;
+        .nx = nx, .ny = ny, .nz = nz,
+        /* Index strides matching gf_indx_3d: idx = i + (j + k*ny)*nx */
+        .stride_y = nx,
+        .stride_z = nx * ny,
 
-    /* Compute the SOR update at one cell, including the per-axis
-     * non-uniform stencil at cells adjacent to a hybrid Dirichlet
-     * vertex (the gap on the D side is h/2, not h).  Most cells take
-     * the fast path (precomputed cx, cy, cz, cs).  The slow path is
-     * triggered only at i in {1, nx-2} on a hybrid x axis, etc. --
-     * O(N^2) cells out of O(N^3). */
-    #define APPLY_SOR_3D(idx_, i_, j_, k_)                                                 \
-        do {                                                                                \
-            const double u_xm_ = u[(idx_) - 1];                                            \
-            const double u_xp_ = u[(idx_) + 1];                                            \
-            const double u_ym_ = u[(idx_) - stride_y];                                     \
-            const double u_yp_ = u[(idx_) + stride_y];                                     \
-            const double u_zm_ = u[(idx_) - stride_z];                                     \
-            const double u_zp_ = u[(idx_) + stride_z];                                     \
-            const bool x_sp_ = ((i_) == 1 && x_lower_d_v) || ((i_) == nx - 2 && x_upper_d_v); \
-            const bool y_sp_ = ((j_) == 1 && y_lower_d_v) || ((j_) == ny - 2 && y_upper_d_v); \
-            const bool z_sp_ = ((k_) == 1 && z_lower_d_v) || ((k_) == nz - 2 && z_upper_d_v); \
-            double u_new_;                                                                  \
-            if (!x_sp_ && !y_sp_ && !z_sp_) {                                              \
-                u_new_ = cx * (u_xp_ + u_xm_) + cy * (u_yp_ + u_ym_)                       \
-                       + cz * (u_zp_ + u_zm_) - cs * rhs[(idx_)];                          \
-            } else {                                                                        \
-                /* Phase 6.2 4-point Lagrange stencil at the cell adjacent \
-                 * to a hybrid Dirichlet vertex.  Cubic Lagrange-extrapolate \
-                 * a virtual ghost u(-h/2) through the four points (u_v, \
-                 * u_self, u_far, u_far_far), then plug into the standard \
-                 * centred Laplacian.  Result (lower D side, i=1): \
-                 *   u_xx ~= (1/(5 h^2))(16 u_v - 25 u_self + 10 u_far - u_far_far). \
-                 * O(h^2) Laplacian truncation -> rate 2 globally (vs. the \
-                 * O(h) of the Phase 3 3-point form).  No q-coefficient, so \
-                 * the discrete compatibility is unaffected (the Phase 5 \
-                 * concern was specific to the Neumann ghost variant). */    \
-                double diag_x_ = 2.0, off_x_ = u_xm_ + u_xp_;                              \
-                if (x_sp_) {                                                                \
-                    diag_x_ = 5.0;                                                          \
-                    if ((i_) == 1) {                                                        \
-                        const double u_ff_ = u[(idx_) + 2];                                \
-                        off_x_ = (16.0/5.0) * u_xm_ + 2.0 * u_xp_ - (1.0/5.0) * u_ff_;       \
-                    } else {                                                                \
-                        const double u_ff_ = u[(idx_) - 2];                                \
-                        off_x_ = (16.0/5.0) * u_xp_ + 2.0 * u_xm_ - (1.0/5.0) * u_ff_;       \
-                    }                                                                       \
-                }                                                                           \
-                double diag_y_ = 2.0, off_y_ = u_ym_ + u_yp_;                              \
-                if (y_sp_) {                                                                \
-                    diag_y_ = 5.0;                                                          \
-                    if ((j_) == 1) {                                                        \
-                        const double u_ff_ = u[(idx_) + 2 * stride_y];                      \
-                        off_y_ = (16.0/5.0) * u_ym_ + 2.0 * u_yp_ - (1.0/5.0) * u_ff_;       \
-                    } else {                                                                \
-                        const double u_ff_ = u[(idx_) - 2 * stride_y];                      \
-                        off_y_ = (16.0/5.0) * u_yp_ + 2.0 * u_ym_ - (1.0/5.0) * u_ff_;       \
-                    }                                                                       \
-                }                                                                           \
-                double diag_z_ = 2.0, off_z_ = u_zm_ + u_zp_;                              \
-                if (z_sp_) {                                                                \
-                    diag_z_ = 5.0;                                                          \
-                    if ((k_) == 1) {                                                        \
-                        const double u_ff_ = u[(idx_) + 2 * stride_z];                      \
-                        off_z_ = (16.0/5.0) * u_zm_ + 2.0 * u_zp_ - (1.0/5.0) * u_ff_;       \
-                    } else {                                                                \
-                        const double u_ff_ = u[(idx_) - 2 * stride_z];                      \
-                        off_z_ = (16.0/5.0) * u_zp_ + 2.0 * u_zm_ - (1.0/5.0) * u_ff_;       \
-                    }                                                                       \
-                }                                                                           \
-                const double diag_ = diag_x_ * inv_dx2 + diag_y_ * inv_dy2 + diag_z_ * inv_dz2; \
-                const double off_  = off_x_  * inv_dx2 + off_y_  * inv_dy2 + off_z_  * inv_dz2; \
-                u_new_ = (off_ - rhs[(idx_)]) / diag_;                                      \
-            }                                                                               \
-            u[(idx_)] = (1.0 - omega) * u[(idx_)] + omega * u_new_;                        \
-        } while (0)
+        .cx = dy2dz2 / denom,           /* weight for u[i+/-1, j, k] */
+        .cy = dx2dz2 / denom,           /* weight for u[i, j+/-1, k] */
+        .cz = dx2dy2 / denom,           /* weight for u[i, j, k+/-1] */
+        .cs = dx2dy2 * dz2 / denom,     /* weight for source         */
+
+        .inv_dx2 = 1.0 / dx2,
+        .inv_dy2 = 1.0 / dy2,
+        .inv_dz2 = 1.0 / dz2,
+
+        .omega = omega,
+
+        .x_lower_d_v = (gfs->domain.lower_x_rank == INVALID_RANK)
+                       && !gfs->domain.neumann_lower_x
+                       &&  gfs->domain.neumann_upper_x,
+        .x_upper_d_v = (gfs->domain.upper_x_rank == INVALID_RANK)
+                       &&  gfs->domain.neumann_lower_x
+                       && !gfs->domain.neumann_upper_x,
+        .y_lower_d_v = (gfs->domain.lower_y_rank == INVALID_RANK)
+                       && !gfs->domain.neumann_lower_y
+                       &&  gfs->domain.neumann_upper_y,
+        .y_upper_d_v = (gfs->domain.upper_y_rank == INVALID_RANK)
+                       &&  gfs->domain.neumann_lower_y
+                       && !gfs->domain.neumann_upper_y,
+        .z_lower_d_v = (gfs->domain.lower_z_rank == INVALID_RANK)
+                       && !gfs->domain.neumann_lower_z
+                       &&  gfs->domain.neumann_upper_z,
+        .z_upper_d_v = (gfs->domain.upper_z_rank == INVALID_RANK)
+                       &&  gfs->domain.neumann_lower_z
+                       && !gfs->domain.neumann_upper_z,
+    };
 
     for (int iter = 0; iter < n_smooth; iter++)
     {
@@ -393,7 +434,7 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
                 for (int64_t i = red_start; i < nx - gs; i += 2)
                 {
                     const int64_t idx = i + (j + k * ny) * nx;
-                    APPLY_SOR_3D(idx, i, j, k);
+                    sor_update_3d(idx, i, j, k, &ctx);
                 }
             }
         }
@@ -412,15 +453,13 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
                 for (int64_t i = black_start; i < nx - gs; i += 2)
                 {
                     const int64_t idx = i + (j + k * ny) * nx;
-                    APPLY_SOR_3D(idx, i, j, k);
+                    sor_update_3d(idx, i, j, k, &ctx);
                 }
             }
         }
         sync_var_3d(gfs, VAR_SOL);
         apply_bc_3d(gfs, VAR_SOL);
     }
-
-    #undef APPLY_SOR_3D
 }
 
 /******************************************************************
