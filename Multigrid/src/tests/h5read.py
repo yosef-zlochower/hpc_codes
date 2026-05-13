@@ -2,7 +2,7 @@
 
 Each rank writes one file `rank_<R>.h5` containing:
   /metadata           (group with grid attributes — see io.c)
-  /Var0, /Var1, ...   (per-variable datasets, ny*nx in 2D or nz*ny*nx in 3D)
+  /Var0, /Var1, ...   (per-variable datasets, shape nz*ny*nx)
 
 `load_rank` returns a dict whose keys mirror the legacy JSON field names
 the verifier scripts already use (`nx`, `dx`, `local_i0`, `lower_x_ghost`,
@@ -29,11 +29,6 @@ def load_rank(rank: int, varname: str = "Var0", *, directory: str = ".") -> dict
     """Read the per-rank file and return a dict with the legacy field names.
 
     `varname` selects which dataset in the file to load into `data`.
-    Missing metadata fields (e.g. z-axis fields on a 2D file) are
-    represented exactly the way the old `d.get(name, default)` calls
-    expected: `nz`, `dz`, `z0`, `local_k0`, and the global z fields
-    are absent rather than zero, so verifiers can still use `.get()`
-    to test 2D vs 3D.
     """
     path = f"{directory}/rank_{rank}.h5"
     with h5py.File(path, "r") as f:

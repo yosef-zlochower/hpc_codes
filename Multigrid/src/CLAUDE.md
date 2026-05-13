@@ -126,11 +126,11 @@ to other source terms and boundary conditions.
 
 ### Layer structure (bottom to top)
 
-1. **`domain.{c,h}`** — MPI Cartesian decomposition. `setup_3d_domain` / `setup_2d_domain` create a Cartesian communicator and distribute grid points across ranks. `automatic_topology` uses greedy prime factorisation to assign processes per dimension.
+1. **`domain.{c,h}`** — MPI Cartesian decomposition. `setup_3d_domain` creates a Cartesian communicator and distributes grid points across ranks. `automatic_topology` uses greedy prime factorisation to assign processes per dimension.
 
-2. **`gf.{c,h}`** — Grid function containers. `struct ngfs_3d` / `struct ngfs_2d` hold local dimensions, origin/spacing, an array of `struct gf *` variable slots, pre-allocated MPI communication buffers, and `parent`/`child` pointers for the multigrid hierarchy. Index macro: `gf_indx_3d(gfs, i, j, k) = i + (j + k*ny)*nx` (i is fastest-varying).
+2. **`gf.{c,h}`** — Grid function containers. `struct ngfs_3d` holds local dimensions, origin/spacing, an array of `struct gf *` variable slots, pre-allocated MPI communication buffers, and `parent`/`child` pointers for the multigrid hierarchy. Index macro: `gf_indx_3d(gfs, i, j, k) = i + (j + k*ny)*nx` (i is fastest-varying).
 
-3. **`comm.{c,h}`** — Ghost-zone synchronisation. `sync_var_3d` / `sync_var_2d` pack/unpack face buffers and perform non-blocking MPI sends/receives one axis at a time.
+3. **`comm.{c,h}`** — Ghost-zone synchronisation. `sync_var_3d` packs/unpacks face buffers and performs non-blocking MPI sends/receives one axis at a time.
 
 4. **`gauss_seidel.{c,h}`** — Smoother and defect. Implements red-black Gauss-Seidel SOR for the 7-point Laplacian (`gauss_seidel_3d`), defect calculation (`calc_defect_3d`), and Dirichlet BC enforcement (`apply_bc_3d`). Red-black colouring is based on the global index parity `(global_i + global_j + global_k) % 2`.
 
@@ -158,7 +158,7 @@ Contains standalone Python/Numba implementations (1D, 2D, 3D) used as reference 
 
 Each operator-level test binary exercises a specific operation (domain
 decomposition, hierarchy creation, injection, restriction, prolongation)
-in both 2D and 3D. Test scripts invoke `mpirun --map-by :OVERSUBSCRIBE`
+in 3D. Test scripts invoke `mpirun --map-by :OVERSUBSCRIBE`
 so tests run on any machine regardless of core count. Most use Python
 verifiers (`verify.py`, `verify_zeros.py`, etc.) that reconstruct the
 global field from per-rank HDF5 files via the `h5read.load_rank`

@@ -6,7 +6,7 @@ from h5read import load_rank
 ROUNDOFF_TOLERANCE = 1.0e-12
 
 """
-Verify the nonlinear restriction test.
+Verify the nonlinear restriction test in 3D.
 
 The parent (fine) grid is filled with f = x*(1-x)*y*(1-y)*z*(1-z).
 After inject + restrict, the child (coarse) grid should hold:
@@ -18,8 +18,6 @@ After inject + restrict, the child (coarse) grid should hold:
     R[f](X,Y,Z) = [X*(1-X) - h^2/2] * [Y*(1-Y) - h^2/2] * [Z*(1-Z) - h^2/2]
 
 where h = dx_child / 2  (the parent fine-grid spacing).
-
-The 2D formula omits the Z factor.
 
 Only owned (non-ghost) child points are checked.  Reads per-rank HDF5
 output (rank_<R>.h5).
@@ -34,13 +32,11 @@ def _restrict1d(t, h2):
 def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
     d0 = load_rank(0)
 
-    # JSON now stores cell counts; convert to grid-point counts for the
-    # vertex-centred Dirichlet layout (points = cells + 1).
+    # Cell counts -> grid-point counts (points = cells + 1).
     global_ni = d0["global_cells_x"] + 1
     global_nj = d0["global_cells_y"] + 1
-    global_nk = d0.get("global_cells_z", 0) + 1
+    global_nk = d0["global_cells_z"] + 1
     mpi_size = d0["mpi_size"]
-    is_3d = "global_cells_z" in d0
 
     max_error = 0.0
 
@@ -49,28 +45,26 @@ def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
 
         nx = d["nx"]
         ny = d["ny"]
-        nz = d.get("nz", 1)
+        nz = d["nz"]
         dx = d["dx"]   # coarse grid spacing (= 2h)
         dy = d["dy"]
-        dz = d.get("dz", 1.0)   # unused in 2D
+        dz = d["dz"]
         x0 = d["x0"]
         y0 = d["y0"]
-        z0 = d.get("z0", 0.0)
+        z0 = d["z0"]
         local_i0 = d["local_i0"]
         local_j0 = d["local_j0"]
-        local_k0 = d.get("local_k0", 0)
+        local_k0 = d["local_k0"]
 
-        gs = d.get("gs", 0)
-        lower_x_ghost = d.get("lower_x_ghost", False)
-        upper_x_ghost = d.get("upper_x_ghost", False)
-        lower_y_ghost = d.get("lower_y_ghost", False)
-        upper_y_ghost = d.get("upper_y_ghost", False)
-        lower_z_ghost = d.get("lower_z_ghost", False)
-        upper_z_ghost = d.get("upper_z_ghost", False)
+        gs = d["gs"]
+        lower_x_ghost = d["lower_x_ghost"]
+        upper_x_ghost = d["upper_x_ghost"]
+        lower_y_ghost = d["lower_y_ghost"]
+        upper_y_ghost = d["upper_y_ghost"]
+        lower_z_ghost = d["lower_z_ghost"]
+        upper_z_ghost = d["upper_z_ghost"]
 
         local_data = d["data"]
-        if local_data.ndim == 2:
-            local_data = local_data.reshape((1,) + local_data.shape)
 
         # Parent (fine) grid spacing per axis: h = dx_child / 2
         h2_x = (dx / 2.0) ** 2
@@ -94,35 +88,24 @@ def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
 
         X = x0 + local_i * dx   # (ni_owned,)
         Y = y0 + local_j * dy   # (nj_owned,)
+        Z = z0 + local_k * dz   # (nk_owned,)
         GI = local_i0 + local_i
         GJ = local_j0 + local_j
+        GK = local_k0 + local_k
 
-        if is_3d:
-            Z  = z0 + local_k * dz  # (nk_owned,)
-            GK = local_k0 + local_k
+        XX  = X[np.newaxis, np.newaxis, :]
+        YY  = Y[np.newaxis, :, np.newaxis]
+        ZZ  = Z[:, np.newaxis, np.newaxis]
+        GII = GI[np.newaxis, np.newaxis, :]
+        GJJ = GJ[np.newaxis, :, np.newaxis]
+        GKK = GK[:, np.newaxis, np.newaxis]
 
-            XX  = X[np.newaxis, np.newaxis, :]
-            YY  = Y[np.newaxis, :, np.newaxis]
-            ZZ  = Z[:, np.newaxis, np.newaxis]
-            GII = GI[np.newaxis, np.newaxis, :]
-            GJJ = GJ[np.newaxis, :, np.newaxis]
-            GKK = GK[:, np.newaxis, np.newaxis]
-
-            on_bdy = ((GII == 0) | (GII == global_ni - 1) |
-                      (GJJ == 0) | (GJJ == global_nj - 1) |
-                      (GKK == 0) | (GKK == global_nk - 1))
-            restrict_val = (_restrict1d(XX, h2_x) *
-                            _restrict1d(YY, h2_y) *
-                            _restrict1d(ZZ, h2_z))
-        else:
-            XX  = X[np.newaxis, :]
-            YY  = Y[:, np.newaxis]
-            GII = GI[np.newaxis, :]
-            GJJ = GJ[:, np.newaxis]
-
-            on_bdy = ((GII == 0) | (GII == global_ni - 1) |
-                      (GJJ == 0) | (GJJ == global_nj - 1))
-            restrict_val = _restrict1d(XX, h2_x) * _restrict1d(YY, h2_y)
+        on_bdy = ((GII == 0) | (GII == global_ni - 1) |
+                  (GJJ == 0) | (GJJ == global_nj - 1) |
+                  (GKK == 0) | (GKK == global_nk - 1))
+        restrict_val = (_restrict1d(XX, h2_x) *
+                        _restrict1d(YY, h2_y) *
+                        _restrict1d(ZZ, h2_z))
 
         # f = 0 on all physical boundaries (homogeneous Dirichlet)
         expected = np.where(on_bdy, 0.0, restrict_val)
@@ -135,8 +118,6 @@ def verify_nl_restrict(tol=ROUNDOFF_TOLERANCE):
         if local_max > tol:
             idx = np.unravel_index(np.argmax(err), err.shape)
             ki, ji, ii = idx
-            gi = int(GI[i_lo + ii]) if not is_3d else int(
-                (local_i0 + local_i)[ii])
             print(f"Rank {rank}: max error = {local_max:.3e} at "
                   f"owned local ({ii},{ji},{ki})")
             return False

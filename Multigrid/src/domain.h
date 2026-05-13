@@ -25,28 +25,6 @@ struct domain1d_st
     int gs;
 };
 
-struct domain2d_st
-{
-    int rank;         /* this processes rank */
-    int mpi_size;     /* Total number of mpi processes */
-    int gs;           /* number of ghost zones */
-    int64_t local_nx; /* number of points in x direction of local grid */
-    int64_t local_ny; /* number of points in y direction of local grid */
-    int64_t local_i0; /* global grid i index of the local grid i=0 */
-    int64_t local_j0; /* global grid j index of the local grid j=0 */
-    int lower_x_rank; /* rank of lower x neighboor */
-    int upper_x_rank; /* rank of upper x neighboor */
-    int lower_y_rank; /* rank of lower y neighboor */
-    int upper_y_rank; /* rank of upper y neighboor */
-    MPI_Comm cart_comm; /* Cartesian communicator */
-    int64_t global_nx_cells; /* number of cells in x of the global grid */
-    int64_t global_ny_cells; /* number of cells in y of the global grid */
-    double global_x0;  /* global minimum x */
-    double global_y0;  /* global minimum y */
-    double dx;        /* grid spacing */
-    double dy;        /* grid spacing */
-};
-
 struct domain3d_st
 {
     int rank;         /* this processes rank */
@@ -107,37 +85,12 @@ int setup_1d_domain(const int ncpu_per_direction, const int direction_rank,
                     struct domain1d_st *domain);
 
 /******************************************************************
-* Purpose: Set up a 2D Cartesian MPI domain decomposition. Creates an MPI
-*     Cartesian communicator, queries neighbour ranks via MPI_Cart_shift,
-*     calls setup_1d_domain for each axis, and fills all fields of the
-*     domain2d_st struct.
-* Input Variables:
-*     nx_cpu: int, processes in x
-*     ny_cpu: int, processes in y
-*     rank: int, MPI_COMM_WORLD rank of this process
-*     global_nx_cells: int64_t, global cell count in x
-*     global_ny_cells: int64_t, global cell count in y
-*     gs: int, ghost zone width
-*     global_x0: double, global domain origin in x
-*     global_y0: double, global domain origin in y
-*     dx: double, grid spacing in x
-*     dy: double, grid spacing in y
-* Output Variables:
-*     domain: struct domain2d_st*, fully initialised
-* Return Values and indicators of success / failure
-*     0 on success, -1 if MPI_Cart_create returns MPI_COMM_NULL
-*******************************************************************/
-int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
-                    const int64_t global_nx_cells, const int64_t global_ny_cells,
-                    const int gs, const double global_x0, const double global_y0,
-                    const double dx, const double dy,
-                    struct domain2d_st *domain);
-
-/******************************************************************
-* Purpose: Set up a 3D Cartesian MPI domain decomposition. Analogous to
-*     setup_2d_domain but for three axes. MPI Cartesian dims are ordered
-*     {nz_cpu, ny_cpu, nx_cpu} so that
-*     rank = rank_x + rank_y*nx_cpu + rank_z*nx_cpu*ny_cpu.
+* Purpose: Set up a 3D Cartesian MPI domain decomposition.  Creates
+*     an MPI Cartesian communicator (dims ordered {nz_cpu, ny_cpu,
+*     nx_cpu} so that rank = rank_x + rank_y*nx_cpu +
+*     rank_z*nx_cpu*ny_cpu), queries neighbour ranks via
+*     MPI_Cart_shift, calls setup_1d_domain for each axis, and fills
+*     all fields of the domain3d_st struct.
 * Input Variables:
 *     nx_cpu: int, processes in x
 *     ny_cpu: int, processes in y
@@ -177,16 +130,6 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
                     const double dx, const double dy, const double dz,
                     struct domain3d_st *domain);
 
-/******************************************************************
-* Purpose: Free the MPI Cartesian communicator associated with a 2D domain.
-* Input Variables:
-*     domain: struct domain2d_st*, domain to clean up
-* Output Variables:
-*     (none)
-* Return Values and indicators of success / failure
-*     0
-*******************************************************************/
-int cleanup_2d_domain(struct domain2d_st *domain);
 /******************************************************************
 * Purpose: Free the MPI Cartesian communicator associated with a 3D domain.
 * Input Variables:

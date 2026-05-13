@@ -19,37 +19,6 @@ run_verify()
 for mode in inject restrict; do
     echo "=== Mode: $mode ==="
 
-    echo -n "2D 1x1 (33x33): "
-    mpirun --map-by :OVERSUBSCRIBE -np 1 ./test_project_2d 32 32 $mode
-    check
-    run_verify
-    echo "Passed"
-
-    echo -n "2D 2x1 (65x33): "
-    mpirun --map-by :OVERSUBSCRIBE -np 2 ./test_project_2d 64 32 $mode
-    check
-    run_verify
-    echo "Passed"
-
-    echo -n "2D 2x2 (33x33): "
-    mpirun --map-by :OVERSUBSCRIBE -np 4 ./test_project_2d 32 32 $mode
-    check
-    run_verify
-    echo "Passed"
-
-    echo -n "2D 2x2 (63x63): "
-    mpirun --map-by :OVERSUBSCRIBE -np 4 ./test_project_2d 62 62 $mode
-    check
-    run_verify
-    echo "Passed"
-
-
-    echo -n "2D 3x3 (33x33): "
-    mpirun --map-by :OVERSUBSCRIBE -np 9 ./test_project_2d 32 32 $mode
-    check
-    run_verify
-    echo "Passed"
-
     echo -n "3D 1x1x1 (33x33x33): "
     mpirun --map-by :OVERSUBSCRIBE -np 1 ./test_project_3d 32 32 32 $mode
     check

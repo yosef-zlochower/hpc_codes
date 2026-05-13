@@ -56,39 +56,3 @@ echo -n  "4x4x4: "
 mpirun --map-by :OVERSUBSCRIBE -np 64 ./test_domain_3d 32 32 32
 check
 rm rank_*.h5
-
-
-echo -n  "1x1: "
-mpirun --map-by :OVERSUBSCRIBE -np 1 ./test_domain_2d 32 32
-check
-rm rank_*.h5
-
-echo -n  "2x1: "
-mpirun --map-by :OVERSUBSCRIBE -np 2 ./test_domain_2d 64 32
-check
-rm rank_*.h5
-
-echo -n  "1x2: "
-mpirun --map-by :OVERSUBSCRIBE -np 2 ./test_domain_2d 32 64
-check
-rm rank_*.h5
-
-echo -n  "3x1: "
-mpirun --map-by :OVERSUBSCRIBE -np 3 ./test_domain_2d 96 32
-check
-rm rank_*.h5
-
-echo -n  "1x3: "
-mpirun --map-by :OVERSUBSCRIBE -np 3 ./test_domain_2d 32 96
-check
-rm rank_*.h5
-
-echo -n  "3x3: "
-mpirun --map-by :OVERSUBSCRIBE -np 9 ./test_domain_2d 32 32
-check
-rm rank_*.h5
-
-echo -n  "4x4: "
-mpirun --map-by :OVERSUBSCRIBE -np 16 ./test_domain_2d 32 32
-check
-rm rank_*.h5

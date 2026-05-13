@@ -87,70 +87,6 @@ int ngfs_3d_allocate(int nvars, struct ngfs_3d *ptr)
 }
 
 /******************************************************************
-* Purpose: Initialise a 2D grid function container after its domain
-*     has been set up. Analogous to ngfs_3d_allocate but for two
-*     dimensions; allocates buffers for four faces (x and y).
-* Input Variables:
-*     nvars: int, number of variable slots
-*     ptr: struct ngfs_2d*, container whose domain field must already
-*         be initialised; ptr->vars must be NULL
-* Output Variables:
-*     ptr: struct ngfs_2d*, all fields populated
-* Return Values and indicators of success / failure
-*     0 on success. Asserts (abort) on allocation failure.
-*******************************************************************/
-int ngfs_2d_allocate(int nvars, struct ngfs_2d *ptr)
-{
-    assert(ptr->vars == NULL);
-    ptr->nvars = nvars;
-    ptr->nx = ptr->domain.local_nx;
-    ptr->ny = ptr->domain.local_ny;
-    ptr->n = ptr->domain.local_nx * ptr->domain.local_ny;
-    ptr->gs = ptr->domain.gs;
-    ptr->dx = ptr->domain.dx;
-    ptr->dy = ptr->domain.dy;
-    ptr->x0 = ptr->domain.global_x0 + ptr->domain.local_i0 * ptr->domain.dx;
-    ptr->y0 = ptr->domain.global_y0 + ptr->domain.local_j0 * ptr->domain.dy;
-
-    ptr->vars = calloc(nvars, sizeof(struct gf *));
-    assert(ptr->vars);
-
-    char *vname = NULL;
-    const size_t name_length = 20;
-    for (int i = 0; i < nvars; i++)
-    {
-        vname = calloc(name_length, sizeof(char));
-        snprintf(vname, name_length, "Var%d", i);
-        ptr->vars[i] = calloc(1, sizeof(struct gf));
-        gf_allocate(ptr->nx * ptr->ny, ptr->gs, ptr->vars[i], vname);
-        free(vname);
-        vname = NULL;
-    }
-
-    /* Calculate buffer sizes */
-    ptr->buff_x_size = (size_t)(ptr->gs * ptr->ny);
-    ptr->buff_y_size = (size_t)(ptr->gs * ptr->nx);
-
-    ptr->lower_x_src = malloc(ptr->buff_x_size * sizeof(double));
-    ptr->lower_x_dst = malloc(ptr->buff_x_size * sizeof(double));
-    ptr->upper_x_src = malloc(ptr->buff_x_size * sizeof(double));
-    ptr->upper_x_dst = malloc(ptr->buff_x_size * sizeof(double));
-
-    ptr->lower_y_src = malloc(ptr->buff_y_size * sizeof(double));
-    ptr->lower_y_dst = malloc(ptr->buff_y_size * sizeof(double));
-    ptr->upper_y_src = malloc(ptr->buff_y_size * sizeof(double));
-    ptr->upper_y_dst = malloc(ptr->buff_y_size * sizeof(double));
-
-    assert(ptr->lower_x_src && ptr->lower_x_dst && ptr->upper_x_src && ptr->upper_x_dst);
-    assert(ptr->lower_y_src && ptr->lower_y_dst && ptr->upper_y_src && ptr->upper_y_dst);
-
-    ptr->parent = NULL;
-    ptr->child  = NULL;
-
-    return 0;
-}
-
-/******************************************************************
 * Purpose: Recursively free the child chain rooted at ptr (if any),
 *     then free this container's variable slots and communication
 *     buffers.  Idempotent: safe to call on a NULL pointer or on a
@@ -229,65 +165,9 @@ int ngfs_3d_deallocate(struct ngfs_3d *ptr)
 }
 
 /******************************************************************
-* Purpose: Recursively free the child chain rooted at ptr (if any),
-*     then free this container's variable slots and communication
-*     buffers.  Idempotent: safe to call on a NULL pointer or on a
-*     container whose vars/buffers have already been freed.  Does
-*     NOT touch ptr->parent, ptr->domain, or the struct itself.
-* Input Variables:
-*     ptr: struct ngfs_2d*, container to deallocate; may be NULL or
-*         already-deallocated
-* Output Variables:
-*     ptr: struct ngfs_2d*, vars set to NULL, nvars/n/gs zeroed,
-*         all buffer pointers freed
-* Return Values and indicators of success / failure
-*     0
-*******************************************************************/
-int ngfs_2d_deallocate(struct ngfs_2d *ptr)
-{
-    if (!ptr) return 0;
-
-    if (ptr->child) {
-        ngfs_2d_free(ptr->child);
-        ptr->child = NULL;
-    }
-
-    if (!ptr->vars) return 0;
-
-    for (int i = 0; i < ptr->nvars; i++)
-    {
-        gf_deallocate(ptr->vars[i]);
-        free(ptr->vars[i]);
-        ptr->vars[i] = NULL;
-    }
-    free(ptr->vars);
-    ptr->nvars = 0;
-    ptr->n = 0;
-    ptr->gs = 0;
-    ptr->vars = NULL;
-
-    free(ptr->lower_x_src);
-    free(ptr->lower_x_dst);
-    free(ptr->upper_x_src);
-    free(ptr->upper_x_dst);
-
-    free(ptr->lower_y_src);
-    free(ptr->lower_y_dst);
-    free(ptr->upper_y_src);
-    free(ptr->upper_y_dst);
-
-    ptr->lower_x_src = ptr->lower_x_dst = NULL;
-    ptr->upper_x_src = ptr->upper_x_dst = NULL;
-    ptr->lower_y_src = ptr->lower_y_dst = NULL;
-    ptr->upper_y_src = ptr->upper_y_dst = NULL;
-
-    return 0;
-}
-
-/******************************************************************
 * Purpose: Allocate the data array and optional name string for a
 *     single grid function struct. Called internally by
-*     ngfs_2d/3d_allocate for each variable slot.
+*     ngfs_3d_allocate for each variable slot.
 * Input Variables:
 *     n: int64_t, total number of grid points to allocate
 *     gs: int, ghost zone width, stored for reference
@@ -362,39 +242,6 @@ int gf_rename(struct gf *gptr, const char *name)
     strncpy(newname, name, s_len + 1);
     gptr->vname = newname;
 
-    return 0;
-}
-
-/******************************************************************
-* Purpose: Free a heap-allocated 2D grid function container, its
-*     entire descendant chain, and its MPI Cartesian communicator.
-*     Calls ngfs_2d_deallocate (which walks the child chain), unlinks
-*     gfs from its parent, frees the domain, and finally frees gfs
-*     itself.  Safe to call with NULL.  Must not be called on a
-*     stack-allocated container -- use ngfs_2d_deallocate +
-*     cleanup_2d_domain on those.
-* Input Variables:
-*     gfs: struct ngfs_2d*, root of the hierarchy to free; may be
-*         NULL
-* Output Variables:
-*     (none — the pointed-to memory is freed)
-* Return Values and indicators of success / failure
-*     0
-*******************************************************************/
-int ngfs_2d_free(struct ngfs_2d *gfs)
-{
-    if (!gfs) return 0;
-
-    /* Releases local resources and recursively frees the child chain. */
-    ngfs_2d_deallocate(gfs);
-
-    if (gfs->parent) {
-        gfs->parent->child = NULL;
-        gfs->parent = NULL;
-    }
-
-    cleanup_2d_domain(&gfs->domain);
-    free(gfs);
     return 0;
 }
 

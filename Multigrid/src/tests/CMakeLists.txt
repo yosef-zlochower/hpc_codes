@@ -16,13 +16,14 @@
 # -----------------------------------------------------------------------------
 
 set(TEST_BINS
-    test_domain_2d test_domain_3d
-    test_child_2d  test_child_3d
-    test_project_2d test_project_3d
-    test_prolong_2d test_prolong_3d
-    test_restrict_nl_2d test_restrict_nl_3d
-    test_prolong_nl_2d  test_prolong_nl_3d
-    test_restrict_cc_3d test_prolong_cc_3d
+    test_domain_3d
+    test_child_3d
+    test_project_3d
+    test_prolong_3d
+    test_restrict_nl_3d
+    test_prolong_nl_3d
+    test_restrict_cc_3d
+    test_prolong_cc_3d
 )
 
 foreach(name IN LISTS TEST_BINS)

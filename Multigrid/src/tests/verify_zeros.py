@@ -6,7 +6,7 @@ from h5read import load_rank
 ROUNDOFF_TOLERANCE = 1.0e-12
 
 """
-Verify the prolongation test.
+Verify the prolongation test in 3D.
 
 After fill_parent(f) -> inject+restrict -> child -> prolong -> parent, the
 parent array should be zero everywhere EXCEPT at physical boundary points,
@@ -16,7 +16,7 @@ Dirichlet boundary values on both the lower and upper faces of every axis).
 For each owned (non-ghost) point, the check is:
   - If the point lies on any global physical boundary
     (global_ix == 0 or gni-1, global_jy == 0 or gnj-1,
-     3D: global_kz == 0 or gnk-1): skip
+     global_kz == 0 or gnk-1): skip
   - Otherwise: |value| must be < tol
 
 Reads per-rank HDF5 output (rank_<R>.h5).
@@ -32,32 +32,28 @@ def verify_zeros(tol=ROUNDOFF_TOLERANCE):
     for rank in range(mpi_size):
         d = load_rank(rank)
 
-        is_3d = "nz" in d
-        nz = d.get("nz", 1)
+        nz = d["nz"]
         ny = d["ny"]
         nx = d["nx"]
 
-        local_k0 = d.get("local_k0", 0)
+        local_k0 = d["local_k0"]
         local_j0 = d["local_j0"]
         local_i0 = d["local_i0"]
 
-        # JSON now stores cell counts; convert to grid-point counts for the
-        # vertex-centred Dirichlet layout (points = cells + 1).
+        # Cell counts -> grid-point counts (points = cells + 1).
         global_ni = d["global_cells_x"] + 1
         global_nj = d["global_cells_y"] + 1
-        global_nk = d.get("global_cells_z", 0) + 1
+        global_nk = d["global_cells_z"] + 1
 
-        gs = d.get("gs", 0)
-        lower_x_ghost = d.get("lower_x_ghost", False)
-        upper_x_ghost = d.get("upper_x_ghost", False)
-        lower_y_ghost = d.get("lower_y_ghost", False)
-        upper_y_ghost = d.get("upper_y_ghost", False)
-        lower_z_ghost = d.get("lower_z_ghost", False)
-        upper_z_ghost = d.get("upper_z_ghost", False)
+        gs = d["gs"]
+        lower_x_ghost = d["lower_x_ghost"]
+        upper_x_ghost = d["upper_x_ghost"]
+        lower_y_ghost = d["lower_y_ghost"]
+        upper_y_ghost = d["upper_y_ghost"]
+        lower_z_ghost = d["lower_z_ghost"]
+        upper_z_ghost = d["upper_z_ghost"]
 
         local_data = d["data"]
-        if local_data.ndim == 2:
-            local_data = local_data.reshape((1,) + local_data.shape)
 
         # Owned (non-ghost) index ranges
         i_lo = gs if lower_x_ghost else 0
@@ -79,7 +75,7 @@ def verify_zeros(tol=ROUNDOFF_TOLERANCE):
                         continue
                     if global_jy == 0 or global_jy == global_nj - 1:
                         continue
-                    if is_3d and (global_kz == 0 or global_kz == global_nk - 1):
+                    if global_kz == 0 or global_kz == global_nk - 1:
                         continue
                     val = local_data[k, j, i]
                     err = abs(val)

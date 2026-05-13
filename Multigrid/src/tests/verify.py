@@ -7,12 +7,9 @@ from h5read import load_rank
 ROUNDOFF_TOLERANCE = 1.0e-12
 
 """
-Verify domain decomposition and syncing tests for both 2d and 3d cases. 2d
-cases are mapped to 3d grids
-  data[j,i] -> data[0,j,i].
-  Note that the data are stored in fortran order.
+Verify domain decomposition and syncing tests in 3D.
 
-Reads per-rank HDF5 output (rank_<R>.h5) written by output_*_gf.  Each
+Reads per-rank HDF5 output (rank_<R>.h5) written by output_3d_gf.  Each
 file contains a /metadata group with grid attributes and one or more
 /<vname> datasets; load_rank returns those in a dict whose keys mirror
 the legacy JSON field names.
@@ -23,25 +20,22 @@ Ghost metadata fields:
   upper_x_ghost : true if this rank has an MPI neighbor on the upper-x face
   lower_y_ghost : true if this rank has an MPI neighbor on the lower-y face
   upper_y_ghost : true if this rank has an MPI neighbor on the upper-y face
-  lower_z_ghost : true if this rank has an MPI neighbor on the lower-z face (3D only)
-  upper_z_ghost : true if this rank has an MPI neighbor on the upper-z face (3D only)
+  lower_z_ghost : true if this rank has an MPI neighbor on the lower-z face
+  upper_z_ghost : true if this rank has an MPI neighbor on the upper-z face
 """
 
 
 def verify_domain_and_sync(tol=ROUNDOFF_TOLERANCE):
     d = load_rank(0)
 
-    # JSON now stores cell counts; convert to grid-point counts for the
-    # vertex-centred Dirichlet layout (points = cells + 1).
+    # Cell counts -> grid-point counts for the vertex-centred Dirichlet
+    # layout (points = cells + 1).
     global_ni = d["global_cells_x"] + 1
     global_nj = d["global_cells_y"] + 1
-    global_nk = d.get("global_cells_z", 0) + 1  # 2D: 1 plane → 0+1 cells
+    global_nk = d["global_cells_z"] + 1
     global_x0 = d["global_x0"]
     global_y0 = d["global_y0"]
-    global_z0 = d.get("global_z0", 0)  # in 2d case, set z=0
-    dx = d["dx"]
-    dy = d["dy"]
-    dz = d.get("dz", 0)
+    global_z0 = d["global_z0"]
     mpi_size = d["mpi_size"]
 
     test_array = np.full((global_nk, global_nj, global_ni), np.nan)
@@ -50,32 +44,29 @@ def verify_domain_and_sync(tol=ROUNDOFF_TOLERANCE):
     for rank in range(mpi_size):
         d = load_rank(rank)
 
-        nz = d.get('nz', 1)  # in 2d case, set nz=1
+        nz = d['nz']
         ny = d['ny']
         nx = d['nx']
         x0 = d['x0']
         y0 = d['y0']
-        z0 = d.get('z0', 0)
+        z0 = d['z0']
         dx = d['dx']
         dy = d['dy']
-        dz = d.get('dz', 0)
+        dz = d['dz']
 
-        local_k0 = d.get("local_k0", 0)
+        local_k0 = d["local_k0"]
         local_j0 = d["local_j0"]
         local_i0 = d["local_i0"]
 
-        # Ghost metadata (defaults: no ghost zones = backward compatible)
-        gs = d.get("gs", 0)
-        lower_x_ghost = d.get("lower_x_ghost", False)
-        upper_x_ghost = d.get("upper_x_ghost", False)
-        lower_y_ghost = d.get("lower_y_ghost", False)
-        upper_y_ghost = d.get("upper_y_ghost", False)
-        lower_z_ghost = d.get("lower_z_ghost", False)
-        upper_z_ghost = d.get("upper_z_ghost", False)
+        gs = d["gs"]
+        lower_x_ghost = d["lower_x_ghost"]
+        upper_x_ghost = d["upper_x_ghost"]
+        lower_y_ghost = d["lower_y_ghost"]
+        upper_y_ghost = d["upper_y_ghost"]
+        lower_z_ghost = d["lower_z_ghost"]
+        upper_z_ghost = d["upper_z_ghost"]
 
         local_data = d["data"]
-        if local_data.ndim == 2:
-            local_data = local_data.reshape((1,) + local_data.shape)
 
         # Build coordinate arrays for ALL local points (including ghost zones)
         local_x = x0 + np.arange(nx) * dx          # shape (nx,)
@@ -119,7 +110,7 @@ def verify_domain_and_sync(tol=ROUNDOFF_TOLERANCE):
     # Build global expected array
     gx = global_x0 + np.arange(global_ni) * d["dx"]
     gy = global_y0 + np.arange(global_nj) * d["dy"]
-    gz = global_z0 + np.arange(global_nk) * d.get("dz", 0)
+    gz = global_z0 + np.arange(global_nk) * d["dz"]
     global_expected = (1.5 * gx[np.newaxis, np.newaxis, :]
                        - 2.0 * gy[np.newaxis, :, np.newaxis]
                        + gz[:, np.newaxis, np.newaxis])

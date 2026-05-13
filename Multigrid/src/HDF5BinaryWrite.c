@@ -27,7 +27,7 @@
         }                                                                      \
     } while (0)
 
-/* ---- Static attribute writers (shared by 2D and 3D metadata) ----------- */
+/* ---- Static attribute writers used by 3D metadata --------------------- */
 
 static void create_int_attribute(hid_t parent, const char *name, int val)
 {
@@ -158,54 +158,6 @@ static void write_metadata_3d(hid_t file_id, const struct ngfs_3d *gfs)
     (void)error_count;
 }
 
-/* ---- 2D metadata (subset of the 3D fields) ----------------------------- */
-
-static void write_metadata_2d(hid_t file_id, const struct ngfs_2d *gfs)
-{
-    int error_count = 0;
-    hid_t meta;
-    HDF5_ERROR(meta = H5Gcreate(file_id, "/metadata", H5P_DEFAULT,
-                                H5P_DEFAULT, H5P_DEFAULT));
-
-    create_int_attribute(meta, "gs",       gfs->gs);
-    create_int_attribute(meta, "rank",     gfs->domain.rank);
-    create_int_attribute(meta, "mpi_size", gfs->domain.mpi_size);
-
-    create_int64_attribute(meta, "nx", (int64_t)gfs->nx);
-    create_int64_attribute(meta, "ny", (int64_t)gfs->ny);
-
-    create_int64_attribute(meta, "local_i0", (int64_t)gfs->domain.local_i0);
-    create_int64_attribute(meta, "local_j0", (int64_t)gfs->domain.local_j0);
-
-    create_int64_attribute(meta, "global_cells_x",
-                           (int64_t)gfs->domain.global_nx_cells);
-    create_int64_attribute(meta, "global_cells_y",
-                           (int64_t)gfs->domain.global_ny_cells);
-
-    create_double_attribute(meta, "dx", gfs->dx);
-    create_double_attribute(meta, "dy", gfs->dy);
-    create_double_attribute(meta, "x0", gfs->x0);
-    create_double_attribute(meta, "y0", gfs->y0);
-    create_double_attribute(meta, "global_x0", gfs->domain.global_x0);
-    create_double_attribute(meta, "global_y0", gfs->domain.global_y0);
-
-    create_bool_attribute(meta, "lower_x_ghost",
-                          gfs->domain.lower_x_rank != INVALID_RANK);
-    create_bool_attribute(meta, "upper_x_ghost",
-                          gfs->domain.upper_x_rank != INVALID_RANK);
-    create_bool_attribute(meta, "lower_y_ghost",
-                          gfs->domain.lower_y_rank != INVALID_RANK);
-    create_bool_attribute(meta, "upper_y_ghost",
-                          gfs->domain.upper_y_rank != INVALID_RANK);
-
-    /* 2D domain has no Neumann-flag fields (CellCentred_plan applies to
-     * 3D only); 2D output is used solely by operator tests that don't
-     * need the per-face boundary kind. */
-
-    HDF5_ERROR(H5Gclose(meta));
-    (void)error_count;
-}
-
 /* ---- Public writer entry points ---------------------------------------- */
 
 /* Per-process record of "have I already written to this file in the
@@ -326,38 +278,3 @@ int BinaryWriteArray_3d(const char *filename, const char *datasetname,
     return (error_count > 0) ? -1 : 0;
 }
 
-int BinaryWriteArray_2d(const char *filename, const char *datasetname,
-                        const size_t local_dim[2], const double *data,
-                        const struct ngfs_2d *gfs)
-{
-    int error_count = 0;
-    hid_t file_id;
-
-    if (file_seen_this_run(filename))
-    {
-        HDF5_ERROR(file_id = H5Fopen(filename, H5F_ACC_RDWR, H5P_DEFAULT));
-    }
-    else
-    {
-        if (refuse_if_exists(filename, gfs->domain.rank) != 0)
-            return -1;
-        HDF5_ERROR(file_id = H5Fcreate(filename, H5F_ACC_EXCL,
-                                       H5P_DEFAULT, H5P_DEFAULT));
-        if (file_id >= 0) {
-            write_metadata_2d(file_id, gfs);
-            mark_file_seen(filename);
-        }
-    }
-
-    if (file_id < 0)
-    {
-        fprintf(stderr, "rank %d: cannot open HDF5 file '%s'\n",
-                gfs->domain.rank, filename);
-        return -1;
-    }
-
-    error_count += write_dataset(file_id, datasetname, 2, local_dim, data);
-    HDF5_ERROR(H5Fclose(file_id));
-
-    return (error_count > 0) ? -1 : 0;
-}

@@ -11,34 +11,6 @@ check()
 }
 
 
-echo -n "2D 1x1: "
-mpirun --map-by :OVERSUBSCRIBE -np 1 ./test_child_2d 32 32
-check
-
-echo -n "2D 2x1: "
-mpirun --map-by :OVERSUBSCRIBE -np 2 ./test_child_2d 64 32
-check
-
-echo -n "2D 1x2: "
-mpirun --map-by :OVERSUBSCRIBE -np 2 ./test_child_2d 32 64
-check
-
-echo -n "2D 3x1: "
-mpirun --map-by :OVERSUBSCRIBE -np 3 ./test_child_2d 32 96
-check
-
-echo -n "2D 1x3: "
-mpirun --map-by :OVERSUBSCRIBE -np 3 ./test_child_2d 96 32
-check
-
-echo -n "2D 2x2: "
-mpirun --map-by :OVERSUBSCRIBE -np 4 ./test_child_2d 64 64
-check
-
-echo -n "2D 3x3: "
-mpirun --map-by :OVERSUBSCRIBE -np 9 ./test_child_2d 32 32
-check
-
 echo -n "3D 1x1x1: "
 mpirun --map-by :OVERSUBSCRIBE -np 1 ./test_child_3d 32 32 32
 check

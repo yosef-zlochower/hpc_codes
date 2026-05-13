@@ -254,9 +254,8 @@ int setup_1d_domain(const int ncpu_per_direction, const int direction_rank,
 }
 
 /******************************************************************
-* Purpose: Set up a 3D Cartesian MPI domain decomposition. Analogous to
-*     setup_2d_domain but for three axes. MPI Cartesian dims are ordered
-*     {nz_cpu, ny_cpu, nx_cpu} so that
+* Purpose: Set up a 3D Cartesian MPI domain decomposition. MPI Cartesian
+*     dims are ordered {nz_cpu, ny_cpu, nx_cpu} so that
 *     rank = rank_x + rank_y*nx_cpu + rank_z*nx_cpu*ny_cpu.
 * Input Variables:
 *     nx_cpu: int, processes in x
@@ -406,119 +405,6 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
     domain->lower_z_rank = (lower_z == MPI_PROC_NULL) ? INVALID_RANK : lower_z;
     domain->upper_z_rank = (upper_z == MPI_PROC_NULL) ? INVALID_RANK : upper_z;
 
-    return 0;
-}
-
-/******************************************************************
-* Purpose: Set up a 2D Cartesian MPI domain decomposition. Creates an MPI
-*     Cartesian communicator, queries neighbour ranks via MPI_Cart_shift,
-*     calls setup_1d_domain for each axis, and fills all fields of the
-*     domain2d_st struct.
-* Input Variables:
-*     nx_cpu: int, processes in x
-*     ny_cpu: int, processes in y
-*     rank: int, MPI_COMM_WORLD rank of this process
-*     nx_global: int64_t, global grid points in x
-*     ny_global: int64_t, global grid points in y
-*     gs: int, ghost zone width
-*     global_x0: double, global domain origin in x
-*     global_y0: double, global domain origin in y
-*     dx: double, grid spacing in x
-*     dy: double, grid spacing in y
-* Output Variables:
-*     domain: struct domain2d_st*, fully initialised
-* Return Values and indicators of success / failure
-*     0 on success, -1 if MPI_Cart_create returns MPI_COMM_NULL
-*******************************************************************/
-int setup_2d_domain(const int nx_cpu, const int ny_cpu, const int rank,
-                    const int64_t global_nx_cells, const int64_t global_ny_cells,
-                    const int gs, const double global_x0, const double global_y0,
-                    const double dx, const double dy,
-                    struct domain2d_st *domain)
-{
-    struct domain1d_st domain_1d;
-
-    /* See setup_3d_domain for the cells / points distinction. */
-    domain->global_nx_cells = global_nx_cells;
-    domain->global_ny_cells = global_ny_cells;
-    const int64_t nx_points = global_nx_cells + 1;
-    const int64_t ny_points = global_ny_cells + 1;
-    domain->gs = gs;
-
-    domain->global_x0 = global_x0;
-    domain->global_y0 = global_y0;
-
-    domain->dx = dx;
-    domain->dy = dy;
-
-    domain->mpi_size = nx_cpu * ny_cpu;
-
-    /* Create Cartesian topology */
-    /* Note: MPI uses row-major ordering, so dims are {ny_cpu, nx_cpu} to match
-     * the old rank formula: rank = rank_x + rank_y * nx_cpu */
-    int dims[2] = { ny_cpu, nx_cpu };
-    int periods[2] = { 0, 0 }; /* non-periodic boundaries */
-    int reorder = 0;           /* preserve rank ordering */
-    MPI_Comm cart_comm;
-    MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, reorder, &cart_comm);
-
-    if (cart_comm == MPI_COMM_NULL)
-    {
-        return -1; /* Error creating Cartesian communicator */
-    }
-
-    domain->cart_comm = cart_comm;
-
-    /* Get coordinates in Cartesian grid */
-    int coords[2];
-    MPI_Cart_coords(cart_comm, rank, 2, coords);
-    const int rank_y = coords[0];
-    const int rank_x = coords[1];
-
-    /* Get neighbor ranks using MPI_Cart_shift */
-    int lower_x, upper_x, lower_y, upper_y;
-    /* Direction 0 is Y (first dimension), direction 1 is X (second dimension)
-     */
-    MPI_Cart_shift(cart_comm, 1, 1, &lower_x, &upper_x);
-    MPI_Cart_shift(cart_comm, 0, 1, &lower_y, &upper_y);
-
-    /* Setup 1D domains as before */
-    setup_1d_domain(nx_cpu, rank_x, nx_points, gs, &domain_1d);
-
-    domain->rank = rank;
-    domain->local_nx = domain_1d.n;
-    domain->local_i0 = domain_1d.local0;
-
-    /* Convert MPI_PROC_NULL to INVALID_RANK for backward compatibility */
-    domain->lower_x_rank = (lower_x == MPI_PROC_NULL) ? INVALID_RANK : lower_x;
-    domain->upper_x_rank = (upper_x == MPI_PROC_NULL) ? INVALID_RANK : upper_x;
-
-    setup_1d_domain(ny_cpu, rank_y, ny_points, gs, &domain_1d);
-    domain->local_ny = domain_1d.n;
-    domain->local_j0 = domain_1d.local0;
-
-    domain->lower_y_rank = (lower_y == MPI_PROC_NULL) ? INVALID_RANK : lower_y;
-    domain->upper_y_rank = (upper_y == MPI_PROC_NULL) ? INVALID_RANK : upper_y;
-
-    return 0;
-}
-
-/******************************************************************
-* Purpose: Free the MPI Cartesian communicator associated with a 2D domain.
-* Input Variables:
-*     domain: struct domain2d_st*, domain to clean up
-* Output Variables:
-*     (none)
-* Return Values and indicators of success / failure
-*     0
-*******************************************************************/
-int cleanup_2d_domain(struct domain2d_st *domain)
-{
-    if (domain->cart_comm != MPI_COMM_NULL)
-    {
-        MPI_Comm_free(&domain->cart_comm);
-        domain->cart_comm = MPI_COMM_NULL;
-    }
     return 0;
 }
 

@@ -6,201 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/******************************************************************
-* Purpose: Synchronise the ghost zones of a 2D grid variable with
-*     all MPI neighbours. Packs interior-edge data into send buffers,
-*     performs non-blocking sends and receives in the x-direction
-*     then y-direction, and unpacks received data into the local
-*     ghost-zone regions. After this call all ghost zones adjacent to
-*     MPI neighbours hold current values from those neighbours.
-* Input Variables:
-*     gfs: struct ngfs_2d*, grid function container; communication
-*         buffers and domain neighbour ranks must already be set up
-*     var: int, index of the variable in gfs->vars[] to synchronise
-* Output Variables:
-*     gfs->vars[var]->val: double*, ghost-zone regions updated with
-*         data from MPI neighbours
-* Return Values and indicators of success / failure
-*     void. Side effects: two rounds of MPI_Isend/MPI_Irecv/
-*     MPI_Waitall (x then y).
-*******************************************************************/
-void sync_var_2d(struct ngfs_2d *gfs, int var)
-{
-    /* --- 1. Setup and Dimensions --- */
-    const int gs = gfs->gs;
-    const int64_t nx = gfs->nx;
-    const int64_t ny = gfs->ny;
-    double *val = gfs->vars[var]->val;
-
-    const int lower_x_rank = gfs->domain.lower_x_rank;
-    const int upper_x_rank = gfs->domain.upper_x_rank;
-    const int lower_y_rank = gfs->domain.lower_y_rank;
-    const int upper_y_rank = gfs->domain.upper_y_rank;
-
-    /* Calculate buffer sizes */
-    const size_t buff_x_size = gfs->buff_x_size;
-    const size_t buff_y_size = gfs->buff_y_size;
-
-    double *lower_x_src = gfs->lower_x_src;
-    double *lower_x_dst = gfs->lower_x_dst;
-    double *upper_x_src = gfs->upper_x_src;
-    double *upper_x_dst = gfs->upper_x_dst;
-
-    double *lower_y_src = gfs->lower_y_src;
-    double *lower_y_dst = gfs->lower_y_dst;
-    double *upper_y_src = gfs->upper_y_src;
-    double *upper_y_dst = gfs->upper_y_dst;
-    MPI_Comm cart_comm = gfs->domain.cart_comm;
-
-    MPI_Request send_requests[2];
-    MPI_Request recv_requests[2];
-    int num_requests = 0;
-
-    /* =========================================================
-     * X-DIRECTION SYNCHRONIZATION
-     * ========================================================= */
-
-    if (lower_x_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < ny; j++)
-        {
-            for (int i = 0; i < gs; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, gs + i, j);
-                lower_x_src[i + j * gs] = val[ij];
-            }
-        }
-        MPI_Isend(lower_x_src, buff_x_size, MPI_DOUBLE, lower_x_rank, 0,
-                  cart_comm, send_requests + num_requests);
-        MPI_Irecv(lower_x_dst, buff_x_size, MPI_DOUBLE, lower_x_rank, 0,
-                  cart_comm, recv_requests + num_requests);
-        num_requests++;
-    }
-
-    if (upper_x_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < ny; j++)
-        {
-            for (int i = 0; i < gs; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, i + nx - 2 * gs, j);
-                upper_x_src[i + j * gs] = val[ij];
-            }
-        }
-        MPI_Isend(upper_x_src, buff_x_size, MPI_DOUBLE, upper_x_rank, 0,
-                  cart_comm, send_requests + num_requests);
-        MPI_Irecv(upper_x_dst, buff_x_size, MPI_DOUBLE, upper_x_rank, 0,
-                  cart_comm, recv_requests + num_requests);
-        num_requests++;
-    }
-
-    assert(num_requests <= 2);
-    MPI_Waitall(num_requests, recv_requests, MPI_STATUSES_IGNORE);
-
-    if (lower_x_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < ny; j++)
-        {
-            for (int i = 0; i < gs; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, i, j);
-                val[ij] = lower_x_dst[i + j * gs];
-            }
-        }
-    }
-
-    if (upper_x_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < ny; j++)
-        {
-            for (int i = 0; i < gs; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, i + nx - gs, j);
-                val[ij] = upper_x_dst[i + j * gs];
-            }
-        }
-    }
-
-    MPI_Waitall(num_requests, send_requests, MPI_STATUSES_IGNORE);
-    num_requests = 0;
-
-    /* =========================================================
-     * Y-DIRECTION SYNCHRONIZATION (UPDATED)
-     * ========================================================= */
-
-    /* Pack and Send to Lower Y (Bottom) */
-    if (lower_y_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < gs; j++)
-        {
-            for (int i = 0; i < nx; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, i, gs + j);
-
-                lower_y_src[i + j * nx] = val[ij];
-            }
-        }
-        MPI_Isend(lower_y_src, buff_y_size, MPI_DOUBLE, lower_y_rank, 0,
-                  cart_comm, send_requests + num_requests);
-        MPI_Irecv(lower_y_dst, buff_y_size, MPI_DOUBLE, lower_y_rank, 0,
-                  cart_comm, recv_requests + num_requests);
-        num_requests++;
-    }
-
-    /* Pack and Send to Upper Y (Top) */
-    if (upper_y_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < gs; j++)
-        {
-            for (int i = 0; i < nx; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, i, j + ny - 2 * gs);
-
-                upper_y_src[i + j * nx] = val[ij];
-            }
-        }
-        MPI_Isend(upper_y_src, buff_y_size, MPI_DOUBLE, upper_y_rank, 0,
-                  cart_comm, send_requests + num_requests);
-        MPI_Irecv(upper_y_dst, buff_y_size, MPI_DOUBLE, upper_y_rank, 0,
-                  cart_comm, recv_requests + num_requests);
-        num_requests++;
-    }
-
-    assert(num_requests <= 2);
-    MPI_Waitall(num_requests, recv_requests, MPI_STATUSES_IGNORE);
-
-    /* Unpack Lower Y */
-    if (lower_y_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < gs; j++)
-        {
-            for (int i = 0; i < nx; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, i, j);
-
-                // UPDATED: Row-major indexing [i + j * nx]
-                val[ij] = lower_y_dst[i + j * nx];
-            }
-        }
-    }
-
-    /* Unpack Upper Y */
-    if (upper_y_rank != INVALID_RANK)
-    {
-        for (int j = 0; j < gs; j++)
-        {
-            for (int i = 0; i < nx; i++)
-            {
-                const int64_t ij = gf_indx_2d(gfs, i, j + ny - gs);
-                val[ij] = upper_y_dst[i + j * nx];
-            }
-        }
-    }
-
-    MPI_Waitall(num_requests, send_requests, MPI_STATUSES_IGNORE);
-}
-
-
 /* --- Core Logic --- */
 
 /******************************************************************
@@ -237,8 +42,6 @@ static void transfer_data(double *val, double *buffer, IndexBox box,
             for (int64_t i = box.is; i < box.ie; i++)
             {
 
-                // Calculate grid index assuming standard 3D mapping
-                // For 2D, k is 0, so this collapses cleanly.
                 int64_t grid_idx = i + j * nx + k * nx * ny;
 
                 if (mode == MODE_PACK)
@@ -363,7 +166,7 @@ void sync_var_3d(struct ngfs_3d *gfs, int var)
     const int gs = gfs->gs;
     const int64_t nx = gfs->nx;
     const int64_t ny = gfs->ny;
-    const int64_t nz = gfs->nz; // nz is 1 for 2D logic
+    const int64_t nz = gfs->nz;
     double *val = gfs->vars[var]->val;
     MPI_Comm cart_comm = gfs->domain.cart_comm;
 

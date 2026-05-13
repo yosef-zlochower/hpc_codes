@@ -7,8 +7,8 @@
 #include "HDF5BinaryWrite.h"
 #include "gf.h"
 
-/* Build the per-rank output filename used by both output_2d_gf and
- * output_3d_gf.  Filename pattern:
+/* Build the per-rank output filename used by output_3d_gf.
+ * Filename pattern:
  *
  *     <dir>/rank_<R>.h5
  *
@@ -31,26 +31,6 @@ static const char *dataset_name(const char *vname, int var, char *fallback,
     if (vname && vname[0]) return vname;
     snprintf(fallback, fbuf_len, "VAR_%d", var);
     return fallback;
-}
-
-void output_2d_gf(struct ngfs_2d *gfs, int var, const char *dir)
-{
-    char filename[256];
-    char fallback[64];
-    build_rank_filename(filename, sizeof(filename), dir, gfs->domain.rank);
-    const char *dsname = dataset_name(gfs->vars[var]->vname, var,
-                                      fallback, sizeof(fallback));
-
-    /* HDF5 dataset dims are slowest-axis first: { ny, nx }. */
-    const size_t local_dim[2] = { (size_t)gfs->ny, (size_t)gfs->nx };
-
-    if (BinaryWriteArray_2d(filename, dsname, local_dim,
-                            gfs->vars[var]->val, gfs) != 0)
-    {
-        fprintf(stderr, "rank %d: failed to write '%s' to '%s'\n",
-                gfs->domain.rank, dsname, filename);
-        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-    }
 }
 
 void output_3d_gf(struct ngfs_3d *gfs, int var, const char *dir)

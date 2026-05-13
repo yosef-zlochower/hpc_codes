@@ -286,56 +286,19 @@ the solver doesn't fully handle.  If you don't need it, leaving
 it excluded is fine and the comment in `tests/CMakeLists.txt`
 already documents the limitation honestly.
 
-### 2. 2D code paths are atrophied
+### 2. 2D code paths are atrophied (landed: deleted)
 
-**What.**  Every layer below the driver has a `_2d` companion to
-the `_3d` function (`setup_2d_domain`, `ngfs_2d_allocate`,
-`sync_var_2d`, `inject_var_2d`, `restrict_var_2d`,
-`prolong_var_2d`, `output_2d_gf`).  But:
+**Resolved** by deleting the 2D path entirely.  ~2100 lines
+removed across `domain.{c,h}`, `gf.{c,h}`, `comm.{c,h}`,
+`multigrid.{c,h}`, `io.{c,h}`, `HDF5BinaryWrite.{c,h}`, six
+`test_*_2d.c` files, the 2D blocks in six bash test scripts, and
+the 2D branches in four `verify_*.py` scripts.  `struct
+domain1d_st`, `setup_1d_domain`, and `automatic_topology` were
+kept (used by the 3D path).  All 15 CTest entries still pass.
 
-* `domain2d_st` (`domain.h:28`) carries **no per-face Neumann
-  flags** -- it predates the BC machinery and was never updated.
-* There is no `apply_bc_2d`, no `gauss_seidel_2d`, no
-  `calc_defect_2d`, no `vcycle_2d`.  The 2D infrastructure can
-  hold and move data but cannot solve anything.
-* `sync_var_2d` (`comm.c:27`) **duplicates** the per-axis
-  pack/MPI/unpack logic inline (~200 lines) instead of reusing
-  the `IndexBox` + `transfer_data` + `exchange_direction`
-  abstraction that the 3D version uses (`comm.c:294`).  Result:
-  two distinct sync implementations to keep in lock-step, even
-  though the 3D one would collapse to the 2D case when `nz = 1`.
-* `prolong_var_2d` (`multigrid.c:514`) unconditionally skips the
-  fine-grid boundary node.  In 3D the equivalent code reads
-  `parent->bc` and skips only Dirichlet faces; the 2D version
-  doesn't, because `domain2d_st` has no `bc` field.
-
-The 2D operator tests (`test_*_2d`) keep working because they
-don't exercise the BC machinery (they fill known polynomials and
-verify the operators' algebraic identities), but a user wanting
-to *solve* a 2D problem would have to write the solver itself.
-
-**Where.**  Throughout `src/`.
-
-**Suggested fix.**  Pick one of:
-
-* **Bring 2D up to parity with 3D.**  Add per-face Neumann flags
-  to `domain2d_st`, write `apply_bc_2d`, `gauss_seidel_2d`,
-  `calc_defect_2d`, `vcycle_2d`, and a `prolong_var_2d` /
-  `restrict_var_2d` cell-centred pair.  Substantial work but
-  uniformly mirrors the 3D code.
-* **Delete 2D entirely.**  The 3D path with `nz = 1` does what
-  most 2D code paths need.  Removes ~1000 lines, leaves the
-  operator-level 2D tests as the only thing to clean up.
-* **Make the 2D code 3D-derived.**  Rewrite `sync_var_2d` in
-  terms of `IndexBox` + `exchange_direction` (single-axis
-  collapse); document the rest as "data-structure only, no
-  solver".
-
-My recommendation is **delete 2D entirely** unless there is a
-near-term use for it.  The maintenance burden of two parallel
-implementations (one of which is a half-implementation) is
-non-trivial, and the operator-level tests that currently exercise
-the 2D code would all pass in 3D mode with `nz = 1`.
+This removal also subsumes items 14 (`prolong_var_2d`
+Dirichlet skip) and 15 (`verify_*.py` mixed 2D/3D code paths)
+below.
 
 ### 3. `timer.{c,h}` is dead code
 
@@ -532,35 +495,15 @@ recommendation ("validate args before MPI_Init so the abort
 message reaches the user shell instead of being swallowed by
 MPI"), or remove the markers.
 
-### 14. `prolong_var_2d` hard-codes Dirichlet skip
+### 14. `prolong_var_2d` hard-codes Dirichlet skip (resolved)
 
-**What.**  `multigrid.c:542,553` -- the 2D prolongation always
-skips the global-boundary fine-grid points.  In 3D the
-corresponding code (`multigrid.c:621-626`) reads `parent->bc` per
-face and skips only Dirichlet faces.  So 2D prolongation cannot
-handle a Neumann face even if `domain2d_st` were extended to
-carry the BC info.
+**Resolved** by removing the entire 2D code path (item 2).
 
-**Where.**  `src/multigrid.c:514`.
+### 15. `verify_*.py` mixes 2D and 3D code paths via shape probing (resolved)
 
-**Suggested fix.**  Subsumed by item (2): if 2D is brought to
-parity with 3D, this gets fixed along with the rest; if 2D is
-deleted, it goes away.
-
-### 15. `verify_*.py` mixes 2D and 3D code paths via shape probing
-
-**What.**  Each verifier does `if local_data.ndim == 2:
-local_data = local_data.reshape((1,) + local_data.shape)` (e.g.
-`verify.py:75`) and elsewhere checks `is_3d = "nz" in d` or
-similar (`verify_zeros.py:34`).  The dual-purpose verifiers add
-real complexity to scripts whose job (compare against an analytic
-formula) is conceptually simple.
-
-**Where.**  All four field-comparing verifiers in
-`src/tests/`.
-
-**Suggested fix.**  Subsumed by item (2).  If 2D is deleted,
-each verifier becomes pure 3D and is meaningfully shorter.
+**Resolved** by removing the 2D code path (item 2).  The four
+field-comparing verifiers are now pure 3D, each ~20 lines
+shorter and free of the `is_3d`/`ndim == 2` branches.
 
 ### 16. Driver only outputs `VAR_SOL`
 
@@ -612,10 +555,9 @@ order:
    (item 7 + 8).  Five minutes; fixes the most likely user-visible
    surprise.  Critical for any new user.
 
-2. **Decide on the 2D code path** (item 2).  Either bring it to
-   parity or delete it.  The current half-state is the largest
-   single source of unhelpful complexity in the codebase.  My
-   recommendation: delete.
+2. **Decide on the 2D code path** (item 2). **Done** -- deleted
+   entirely.  ~2100 lines removed; 15/15 CTest still pass; the
+   verifiers and bash scripts are pure 3D.
 
 3. **Wire `timer.{c,h}` into the V-cycle, or delete it** (item 3).
    Either way removes the dead-code surface.

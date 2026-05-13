@@ -23,9 +23,4 @@ int BinaryWriteArray_3d(const char *filename, const char *datasetname,
                         const size_t local_dim[3], const double *data,
                         const struct ngfs_3d *gfs);
 
-/* 2D variant.  `local_dim = { ny, nx }`. */
-int BinaryWriteArray_2d(const char *filename, const char *datasetname,
-                        const size_t local_dim[2], const double *data,
-                        const struct ngfs_2d *gfs);
-
 #endif /* HDF5BINARYWRITE_H */
