@@ -7,10 +7,21 @@ nz_cells = 256  # cells in z
 multigrid = true   # true  -> multigrid V-cycle
                    # false -> plain Gauss-Seidel (single-grid)
 omega     = 1.5    # SOR relaxation parameter (0 < omega < 2)
-n_smooth  = 100      # Gauss-Seidel sweeps per smoothing call
-n_iters   = 20     # maximum outer iterations (V-cycles or GS iterations)
-tol       = 1.0e-9 # convergence tolerance on L-infinity defect norm
+n_smooth  = 2      # red-black Gauss-Seidel sweeps per smoothing call.
+                   # 2 is the standard MG choice; large values (e.g. 100)
+                   # do the work of the coarse-grid correction on the
+                   # fine grid and defeat the point of the V-cycle.
+n_iters   = 40     # maximum outer V-cycles
+tol       = 1.0e-9 # convergence tolerance on L-infinity defect norm.
+                   # 1e-9 is well above the double-precision roundoff
+                   # floor at nx_cells = 256 (~1.5e-10).  Smaller grids
+                   # can reach 1e-12.
 
 # The following are used only when multigrid = true
 subcycles = 1      # coarse-grid sub-cycles per level (1 = V-cycle, 2 = W-like)
-min_cells = 4      # minimum interior cells per rank before coarsening stops
+min_cells = 2      # minimum interior cells per rank before coarsening stops.
+                   # min_cells = 2 lets the hierarchy go as deep as
+                   # possible; setting it higher (e.g. 4) caps the
+                   # hierarchy short on small-per-rank grids and can
+                   # plateau the V-cycle at a defect-reduction factor
+                   # near 0.8 per cycle instead of the expected ~0.1.
