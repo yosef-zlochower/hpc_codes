@@ -181,4 +181,22 @@ void prolong_var_cc_3d(struct ngfs_3d *child, int cvar,
 double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
                  double tol, int subcycles, int verbose);
 
+/******************************************************************
+* Purpose: Register the per-phase wall-clock timers used to instrument
+*     vcycle_3d.  Must be called once (e.g. from the driver) before the
+*     first vcycle_3d invocation that should be timed.  Idempotent: a
+*     second call is a no-op.  Until called, vcycle_3d skips its
+*     start_timer/stop_timer instrumentation entirely, so operator-level
+*     tests and other callers that do not opt in pay no overhead.
+*     After the solve, call print_timers() (timer.h) to dump the
+*     accumulated per-phase totals, min/max per call, and call counts.
+* Input Variables:
+*     (none)
+* Output Variables:
+*     (none)
+* Return Values and indicators of success / failure
+*     void
+*******************************************************************/
+void vcycle_3d_register_timers(void);
+
 #endif

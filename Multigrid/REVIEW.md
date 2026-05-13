@@ -300,23 +300,17 @@ This removal also subsumes items 14 (`prolong_var_2d`
 Dirichlet skip) and 15 (`verify_*.py` mixed 2D/3D code paths)
 below.
 
-### 3. `timer.{c,h}` is dead code
+### 3. `timer.{c,h}` is dead code (resolved)
 
-**What.**  `register_timer`, `start_timer`, `stop_timer`,
-`print_timers` are defined in `src/timer.c` (197 lines), declared
-in `src/timer.h`, compiled into `multigrid_solver` (per
-`src/CMakeLists.txt:21`), linked into every binary, and
-**never called from anywhere in the project**.
-
-**Where.**  `src/timer.{c,h}`, listed at `src/CMakeLists.txt:21`.
-
-**Suggested fix.**  Either wire it in (the V-cycle is the
-natural use: register timers for "pre-smooth", "restrict",
-"prolong", "post-smooth", "defect", print at the end of the
-driver), or delete the file.  Either way removes dead code from
-the production binary.  My recommendation is to **wire it in** at
-the V-cycle level -- a per-phase breakdown is genuinely useful
-for tuning.
+**Resolved** by wiring it into `vcycle_3d`.  The driver now calls
+`vcycle_3d_register_timers()` before the solve loop, the V-cycle
+brackets each of its five phases (`pre_smooth`, `defect`,
+`restrict`, `post_smooth`, `prolong`) with start/stop, and the
+driver dumps the rank-0 breakdown via `print_timers()` after the
+solve.  Operator-level tests that never call
+`vcycle_3d_register_timers()` keep paying zero instrumentation
+overhead -- the wrappers are guarded on the per-timer ID being
+non-negative.
 
 ### 4. `apply_bc_3d` is six near-clones of one operation
 
@@ -395,39 +389,21 @@ with the inner index swap (which axis is "interior", which is
 "ghost") being the only difference.  Same refactor as (4) covers
 this.
 
-### 7. `multigrid.toml` reference parameter file has stale defaults
+### 7. `multigrid.toml` reference parameter file has stale defaults (resolved)
 
-**What.**  `src/multigrid.toml` ships values from the *previous*
-solver tuning -- `omega = 1.5, n_smooth = 100, n_iters = 20,
-tol = 1.0e-9`.  After the cell-centred merge, the convergence
-test's tuned values are `omega = 1.5, n_smooth = 2, n_iters = 40,
-tol = 1.0e-12, min_cells = 2`.  A user copying `multigrid.toml`
-as a starting point will get either a slow solver
-(50× more sweeps than needed) or, in tighter cases, no
-convergence-to-tol.
+**Resolved** by updating the sample to `n_smooth = 2, n_iters = 40,
+min_cells = 2` (the tuned cell-centred values).  `tol` was left at
+`1.0e-9` rather than the convergence test's `1.0e-12` because at
+the sample's `nx_cells = 256` the double-precision roundoff floor
+is `~1.5e-10` and a tighter tol would never trigger.  Inline
+comments explain each choice.
 
-**Where.**  `src/multigrid.toml`.
+### 8. `min_cells` default mismatch (resolved)
 
-**Suggested fix.**  Update the sample file to match the
-convergence-test defaults.  Add comments explaining
-why each value is what it is (the convergence-test script's
-comments are a good template).
-
-### 8. `min_cells` default mismatch
-
-**What.**  Tied to (7).  `run_test_convergence.sh` uses
-`min_cells = 2` (necessary at np=8 with N=32 to get a deep enough
-hierarchy); `multigrid.toml` says `min_cells = 4`; the driver
-itself has no default.  A user with `min_cells = 4` and N=32 at
-np=8 will get the same V-cycle stall the convergence test was
-hitting before the comment in `run_test_convergence.sh`
-explained the fix.
-
-**Suggested fix.**  Make `min_cells = 2` the documented default
-in `multigrid.toml`, with the inline comment from the test
-script copied over.  Alternative: give `min_cells` a default in
-the parser (`multigrid_parameters.cc:88`) and warn if the value
-combined with the chosen `np` and `N` gives fewer than 4 levels.
+**Resolved** as part of (7): the sample TOML now ships
+`min_cells = 2` with an inline comment lifted from
+`run_test_convergence.sh` explaining why a larger value can
+plateau the V-cycle when per-rank tiles are small.
 
 ### 9. `LICENSE` is at `src/LICENSE`, not the repo root
 
@@ -552,15 +528,19 @@ If you want to ship a couple of improvements, here's the priority
 order:
 
 1. **Update `multigrid.toml` to the tuned cell-centred defaults**
-   (item 7 + 8).  Five minutes; fixes the most likely user-visible
-   surprise.  Critical for any new user.
+   (items 7 + 8). **Done** -- sample now uses `n_smooth = 2,
+   n_iters = 40, min_cells = 2` with `tol = 1.0e-9` to match the
+   roundoff floor at the sample's `nx_cells = 256`.
 
 2. **Decide on the 2D code path** (item 2). **Done** -- deleted
    entirely.  ~2100 lines removed; 15/15 CTest still pass; the
    verifiers and bash scripts are pure 3D.
 
 3. **Wire `timer.{c,h}` into the V-cycle, or delete it** (item 3).
-   Either way removes the dead-code surface.
+   **Done** -- the V-cycle now instruments `pre_smooth`, `defect`,
+   `restrict`, `post_smooth`, and `prolong`; the driver prints a
+   per-phase rank-0 breakdown after the solve.  Item 11
+   (`NAME_LENGTH` shadow) is now disambiguatable on its own merits.
 
 4. **Refactor `apply_bc_3d` into a per-face helper** (item 4).
    Halves the file, makes future Robin / periodic BCs a smaller

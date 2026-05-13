@@ -138,7 +138,7 @@ to other source terms and boundary conditions.
 
 6. **`io.{c,h}`** + **`HDF5BinaryWrite.{c,h}`** — Per-rank HDF5 output. `output_3d_gf(gfs, var, dir)` writes the variable as a dataset named `/<vname>` into `<dir>/rank_<R>.h5`; multiple calls from the same rank append additional datasets to the same file. The first call from a rank also writes a `/metadata` group with grid dimensions, spacings, origins, ghost-zone count, per-face Neumann flags, and per-face has-neighbour flags. The post-processing helper `scripts/make_xdmf.py` reads all `rank_*.h5` files in a directory and writes a `multigrid.xmf` sidecar that ParaView / VisIt / PyVista open directly as a single assembled grid (no data copying needed). The `xmf` file references the HDF5 datasets via HyperSlabs and includes the per-axis vertex coordinates, with special handling for the cell-centred layout: hybrid Dirichlet vertices are rendered at the physical boundary; pure-Neumann ghost slots are skipped.
 
-7. **`timer.{c,h}`** — Wall-clock timing utility.
+7. **`timer.{c,h}`** — Wall-clock timing utility. Used by `vcycle_3d` (after the driver calls `vcycle_3d_register_timers()`) to record per-phase wall-clock totals (`pre_smooth`, `defect`, `restrict`, `post_smooth`, `prolong`); the driver dumps the rank-0 breakdown with `print_timers()` after the solve loop.
 
 8. **`parameter.{cc,h}` + `toml.hpp`** — TOML parameter file parser (C++ with C linkage), wrapping the `toml.hpp` header-only library.
 

@@ -2,12 +2,34 @@
 #include "comm.h"
 #include "multigrid.h"
 #include "gauss_seidel.h"
+#include "timer.h"
 #include <assert.h>
 #include <mpi.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Per-phase wall-clock timer IDs for vcycle_3d.  Set by
+ * vcycle_3d_register_timers() (called once from the driver before the
+ * solve loop); -1 means "not registered, skip timing".  The guard lets
+ * unit tests and other callers that do not opt in to timing skip the
+ * instrumentation cost. */
+static int t_presmooth  = -1;
+static int t_defect     = -1;
+static int t_restrict   = -1;
+static int t_postsmooth = -1;
+static int t_prolong    = -1;
+
+void vcycle_3d_register_timers(void)
+{
+    if (t_presmooth >= 0) return;  /* idempotent */
+    t_presmooth  = register_timer("vcycle pre_smooth");
+    t_defect     = register_timer("vcycle defect");
+    t_restrict   = register_timer("vcycle restrict");
+    t_postsmooth = register_timer("vcycle post_smooth");
+    t_prolong    = register_timer("vcycle prolong");
+}
 
 /******************************************************************
 * Purpose: Attempt to create one coarser-grid level below `parent` in a 3D
@@ -674,10 +696,14 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
     { puts("Starting Vcycle"); fflush(stdout); }
 
     /* Pre-smoothing.  gauss_seidel_3d syncs VAR_SOL on exit. */
+    if (t_presmooth >= 0) start_timer(t_presmooth);
     gauss_seidel_3d(gfs, n_smooth, omega);
+    if (t_presmooth >= 0) stop_timer(t_presmooth);
 
     /* Compute defect d = Lu - f.  calc_defect_3d syncs VAR_DEF on exit. */
+    if (t_defect >= 0) start_timer(t_defect);
     double defect_norm = calc_defect_3d(gfs);
+    if (t_defect >= 0) stop_timer(t_defect);
     if (verbose)
         vcycle_debug(rank, level, "defect = %12.6e  (level %d, %ld x %ld x %ld)",
                      defect_norm, level,
@@ -704,12 +730,14 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
              * Cell-centred all-NN problems use the box-average
              * restriction; vertex-centred (or hybrid Phase 2) uses
              * the historical inject + 27-point full-weighting. */
+            if (t_restrict >= 0) start_timer(t_restrict);
             if (all_axes_cc(gfs)) {
                 restrict_var_cc_3d(gfs, VAR_DEF, child, VAR_RHS);
             } else {
                 inject_var_3d(gfs, VAR_DEF, child, VAR_RHS);
                 restrict_var_3d(gfs, VAR_DEF, child, VAR_RHS);
             }
+            if (t_restrict >= 0) stop_timer(t_restrict);
 
             /* Recursive V-cycle.  On return, the child has prolonged its
              * correction into gfs->vars[VAR_SOL]. */
@@ -742,10 +770,14 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
              * Trottenberg, Oosterlee & Schueller, Multigrid (2001), Sec. 2.1.
              *
              * gauss_seidel_3d syncs VAR_SOL on exit of each call. */
+            if (t_postsmooth >= 0) start_timer(t_postsmooth);
             gauss_seidel_3d(gfs, n_smooth, omega);
             gauss_seidel_3d(gfs, n_smooth, 1.0);
+            if (t_postsmooth >= 0) stop_timer(t_postsmooth);
 
+            if (t_defect >= 0) start_timer(t_defect);
             defect_norm = calc_defect_3d(gfs);
+            if (t_defect >= 0) stop_timer(t_defect);
             if (verbose)
                 vcycle_debug(rank, level,
                              "post-smooth defect = %12.6e  (level %d)",
@@ -764,11 +796,13 @@ double vcycle_3d(struct ngfs_3d *gfs, int n_smooth, double omega,
         if (verbose)
             vcycle_debug(rank, level, "prolongate at %ld",
                          (long)gfs->domain.global_nx_cells);
+        if (t_prolong >= 0) start_timer(t_prolong);
         if (all_axes_cc(gfs)) {
             prolong_var_cc_3d(gfs, VAR_SOL, gfs->parent, VAR_SOL);
         } else {
             prolong_var_3d(gfs, VAR_SOL, gfs->parent, VAR_SOL);
         }
+        if (t_prolong >= 0) stop_timer(t_prolong);
     }
 
     return defect_norm;

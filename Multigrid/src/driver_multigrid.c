@@ -6,6 +6,7 @@
 #include "multigrid.h"
 #include "multigrid_parameters.h"
 #include "problem.h"
+#include "timer.h"
 #include <errno.h>
 #include <mpi.h>
 #include <stdio.h>
@@ -195,6 +196,9 @@ int main(int argc, char **argv)
     apply_bc_3d(&gfs, VAR_SOL);
 
     /* ---- Solve ---- */
+    if (param.use_multigrid)
+        vcycle_3d_register_timers();
+
     double norm = calc_defect_3d(&gfs);
     if (mpi_rank == 0)
         printf("\niter %4d  |defect|_inf = %12.6e\n", 0, norm);
@@ -236,6 +240,18 @@ int main(int argc, char **argv)
     const double err = problem_compute_max_error(&gfs, problem);
     if (mpi_rank == 0 && err >= 0.0)
         printf("\n|u - u_exact|_inf = %12.6e\n", err);
+
+    /* ---- Per-phase wall-clock breakdown (rank 0 only) ----
+     * Per-rank wall-clock totals; rank 0's numbers are representative
+     * on the uniform-decomposition case but ranks at the domain edge
+     * can differ slightly because their face-buffer work is
+     * asymmetric.  For a full picture across ranks, run with
+     * `mpirun -np <N> ... 2>&1 | grep vcycle` (every rank prints). */
+    if (param.use_multigrid && mpi_rank == 0)
+    {
+        printf("\nWall-clock breakdown (rank 0):\n");
+        print_timers();
+    }
 
     /* ---- Per-rank JSON output ----
      * If [output] dir is set in the TOML, rank 0 mkdirs the directory
