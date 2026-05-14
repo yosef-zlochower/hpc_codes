@@ -360,14 +360,27 @@ comments explain each choice.
 `run_test_convergence.sh` explaining why a larger value can
 plateau the V-cycle when per-rank tiles are small.
 
-### 9. `LICENSE` is at `src/LICENSE`, not the repo root
+### 9. `LICENSE` is at `src/LICENSE`, not the repo root (resolved)
 
-**What.**  `git ls-files | grep -i licen` returns `src/LICENSE`.
-GitHub, Zenodo, and most license-detection tooling look at the
-top level.  Putting LICENSE in `src/` is unusual and makes the
-project less obviously open-source.
+**Resolved**, and the deeper gap underneath it (the existing
+`src/LICENSE` was *only* a third-party attribution for vendored
+`toml.hpp` + the Hoehrmann UTF-8 decoder -- there was no licence
+declaration for the project's own code) addressed at the same
+time:
 
-**Suggested fix.**  Move it to the repo root.  One-line `git mv`.
+* `LICENSE` at the repo root is now the verbatim GPL-3.0 text
+  (fetched from `https://www.gnu.org/licenses/gpl-3.0.txt`),
+  preceded by the standard "How to Apply These Terms" short
+  notice with the project copyright (Copyright (C) 2026 Yosef
+  Zlochower) and a pointer to the LICENSES/ directory for the
+  third-party notices.
+* `LICENSES/tomlplusplus.txt` and `LICENSES/hoehrmann.txt`
+  carry the two MIT notices verbatim, each with a short header
+  explaining what they apply to.
+* `src/LICENSE` removed via `git rm`.
+
+GitHub / Zenodo / `licensee` will now identify the project as
+GPL-3.0.
 
 ### 10. `gf_indx_3d` takes a non-const pointer
 
