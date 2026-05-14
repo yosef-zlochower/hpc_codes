@@ -462,18 +462,16 @@ Linux distro that ships HDF5 (Ubuntu LTS works); cache the apt
 install of `mpi-default-dev libhdf5-dev python3-h5py` so the
 job stays fast.
 
-### 18. `Boundary_plan.md` and `CellCentred_plan.md` are historical artefacts
+### 18. `Boundary_plan.md` and `CellCentred_plan.md` are historical artefacts (resolved)
 
-**What.**  Two design documents from before the cell-centred work
-landed.  Their content has been absorbed into the production code
-and `doc/documentation.tex`.
-
-**Where.**  Project root.
-
-**Suggested fix.**  Move into `doc/history/` or a separate
-`design/` subdirectory with a one-line README explaining they're
-preserved for project history.  Keeps the project root from
-showing two Plan-like files that aren't the active Plan.md.
+**Resolved** by moving both files into `doc/history/` (preserving
+git history via `git mv`) and adding a short `doc/history/README.md`
+that catalogues what each plan covered.  The two source-code
+comments and the one `Plan.md` table entry that pointed at the
+old top-level paths were updated to the new locations.  The
+project root now shows only the active `Plan.md` alongside the
+top-level reports (`REVIEW.md`, `CELL_CENTERED.md`,
+`Documentation.md`).
 
 ---
 

@@ -378,7 +378,7 @@ void gauss_seidel_3d(struct ngfs_3d *gfs, int n_smooth, double omega)
      * the other.  At the cell adjacent to the D vertex the gap to
      * the vertex is h/2 rather than h, and the standard 7-point
      * stencil is replaced on that axis by the 4-point Lagrange form
-     * (CellCentred_plan.md sec. 4.2). */
+     * (doc/history/CellCentred_plan.md sec. 4.2). */
     const struct sor_ctx_3d ctx = {
         .u   = gfs->vars[VAR_SOL]->val,
         .rhs = gfs->vars[VAR_RHS]->val,

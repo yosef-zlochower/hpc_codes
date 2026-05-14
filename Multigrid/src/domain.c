@@ -306,8 +306,8 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
      * D-N    : Dirichlet vertex at lower end (at exactly a),
      *          Neumann ghost at upper end (at b+h/2).  The gap
      *          between vertex and the first interior cell centre is
-     *          h/2 -- the unavoidable half-step (CellCentred_plan.md
-     *          sec. 2.2).
+     *          h/2 -- the unavoidable half-step
+     *          (doc/history/CellCentred_plan.md sec. 2.2).
      * N-D    : mirror of D-N.
      *
      * Origin shift: gfs->x0 is set so that the standard formula
