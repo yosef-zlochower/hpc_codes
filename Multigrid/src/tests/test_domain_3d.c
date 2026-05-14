@@ -14,22 +14,33 @@ static void verify_var1(struct ngfs_3d *gfs);
 
 int main(int argc, char **argv)
 {
+    /* Argument validation runs before MPI_Init so that a usage error
+     * lands in the user's shell as a clean stderr line, rather than
+     * mixing with MPI's own diagnostics and being cut short by
+     * MPI_Abort tearing down the other ranks mid-write. */
+    if (argc != 4)
+    {
+        fprintf(stderr, "Usage: %s NX NY NZ\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const int global_nx_cells = atoi(argv[1]);
+    const int global_ny_cells = atoi(argv[2]);
+    const int global_nz_cells = atoi(argv[3]);
+
+    if (global_nx_cells <= 0 || global_ny_cells <= 0 || global_nz_cells <= 0)
+    {
+        fprintf(stderr, "NX, NY, NZ all > 0 required (%d, %d, %d)\n",
+                global_nx_cells, global_ny_cells, global_nz_cells);
+        return EXIT_FAILURE;
+    }
+
     MPI_Init(&argc, &argv);
 
     int mpi_size = -1;
     int mpi_rank = -1;
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-
-    if (argc != 4)
-    {
-        fprintf(stderr, "Usage: %s NX NY NZ\n", argv[0]);
-        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-    }
-
-    const int global_nx_cells = atoi(argv[1]);
-    const int global_ny_cells = atoi(argv[2]);
-    const int global_nz_cells = atoi(argv[3]);
 
     size_t dims[3];
     dims[0] = global_nx_cells;
@@ -51,18 +62,10 @@ int main(int argc, char **argv)
     const int py = topology[1];
     const int pz = topology[2];
 
-    if (global_nx_cells <= 0 || global_ny_cells <= 0 || global_nz_cells <= 0)
-    {
-        // TODO: FIX
-        fprintf(stderr, "NX, NY, NZ all > 0 required (%d, %d, %d)\n", global_nx_cells,
-                global_ny_cells, global_nz_cells);
-        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-    }
-
     if (px * py * pz != mpi_size)
     {
-        // TODO: FIX
-        fprintf(stderr, "PX * PY != MPI_SIZE (%d, %d, %d)\n", px, py, mpi_size);
+        fprintf(stderr, "PX * PY * PZ != MPI_SIZE (%d, %d, %d, %d)\n",
+                px, py, pz, mpi_size);
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
@@ -248,33 +251,32 @@ static void corrupt_gf(struct ngfs_3d *gfs)
         .is = 0, .ie = nx, .js = 0, .je = ny, .ks = nz - gs, .ke = nz
     };
 
-    // TODO FIX
-    if (gfs->domain.lower_x_rank > -1)
+    if (gfs->domain.lower_x_rank != INVALID_RANK)
     {
         corrupt_box(gfs, x_lo, 42);
     }
 
-    if (gfs->domain.lower_y_rank > -1)
+    if (gfs->domain.lower_y_rank != INVALID_RANK)
     {
         corrupt_box(gfs, y_lo, 43);
     }
 
-    if (gfs->domain.lower_z_rank > -1)
+    if (gfs->domain.lower_z_rank != INVALID_RANK)
     {
         corrupt_box(gfs, z_lo, 44);
     }
 
-    if (gfs->domain.upper_x_rank > -1)
+    if (gfs->domain.upper_x_rank != INVALID_RANK)
     {
         corrupt_box(gfs, x_hi, 45);
     }
 
-    if (gfs->domain.upper_y_rank > -1)
+    if (gfs->domain.upper_y_rank != INVALID_RANK)
     {
         corrupt_box(gfs, y_hi, 46);
     }
 
-    if (gfs->domain.upper_z_rank > -1)
+    if (gfs->domain.upper_z_rank != INVALID_RANK)
     {
         corrupt_box(gfs, z_hi, 47);
     }

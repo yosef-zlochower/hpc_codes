@@ -412,19 +412,28 @@ extension that writes many files doesn't get a confusing
 cap), or print a warning when the cap is hit so failure is
 explicit.
 
-### 13. `TODO: FIX` markers in test_domain_{2d,3d}.c
+### 13. `TODO: FIX` markers in test_domain_3d.c (resolved)
 
-**What.**  `src/tests/test_domain_2d.c:53,61,155` and
-`src/tests/test_domain_3d.c:56,64,251` each carry `// TODO: FIX`
-comments without explaining what needs fixing.  Reading the code,
-the markers sit next to "the test arguments are invalid"
-diagnostics that call `MPI_Abort` -- so the TODOs are saying "do
-something nicer than MPI_Abort here" but never followed up.
+**Resolved** by addressing each of the three markers
+concretely:
 
-**Suggested fix.**  Either turn each marker into a specific
-recommendation ("validate args before MPI_Init so the abort
-message reaches the user shell instead of being swallowed by
-MPI"), or remove the markers.
+* The `argc != 4` and "NX, NY, NZ all > 0" checks were moved
+  ahead of `MPI_Init` so a usage error returns `EXIT_FAILURE`
+  with a clean stderr line in the user's shell, rather than
+  competing with MPI's own diagnostics and being truncated by
+  `MPI_Abort` mid-write.
+* The `px * py * pz != mpi_size` check had a broken diagnostic
+  (`"PX * PY != MPI_SIZE (%d, %d, %d)"` with args `px, py,
+  mpi_size` -- both message and printed values dropped `pz`).
+  Fixed to `"PX * PY * PZ != MPI_SIZE (%d, %d, %d, %d)"` with
+  `px, py, pz, mpi_size`.
+* The six `_rank > -1` neighbour-existence checks in
+  `corrupt_gf` used a bare `-1` magic constant while the rest
+  of the file uses `!= INVALID_RANK` (defined in `domain.h`).
+  All six replaced with the named-constant form.
+
+The 2D variant referenced in the original item is gone with the
+broader 2D removal (item 2).
 
 ### 14. `prolong_var_2d` hard-codes Dirichlet skip (resolved)
 
