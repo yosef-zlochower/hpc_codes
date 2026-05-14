@@ -458,18 +458,32 @@ test on a 16-cube run confirms `/Var0`, `/Var1`, `/Var2`
 datasets in the per-rank HDF5 file when both flags are on,
 and `/Var0` alone otherwise.
 
-### 17. No CI configuration
+### 17. No CI configuration (resolved -- pending first-run verification)
 
-**What.**  No `.github/workflows/`, no GitLab CI YAML, no Jenkins
-config.  The test suite is comprehensive but only runs when a
-developer locally `ctest`s.
+**Resolved.**  Added
+`.github/workflows/multigrid-ctest.yml` at the monorepo root
+(one level above `Multigrid/`, since GitHub honours workflows
+only at the top-level `.github/`).  The workflow:
 
-**Suggested fix.**  Add a GitHub Actions workflow that runs
-`cmake -B build-test -DBUILD_TESTING=ON && cmake --build &&
-ctest` on every push.  ~30 lines of YAML.  Run on at least one
-Linux distro that ships HDF5 (Ubuntu LTS works); cache the apt
-install of `mpi-default-dev libhdf5-dev python3-h5py` so the
-job stays fast.
+* Triggers on push-to-main and on pull requests, path-filtered
+  to `Multigrid/**` plus the workflow file itself so sibling
+  monorepo subprojects do not spend runner minutes here.
+* Cancels in-progress runs for the same ref on a new commit
+  (`concurrency: cancel-in-progress: true`).
+* Installs `mpi-default-dev libhdf5-dev libhdf5-hl-dev
+  python3-h5py python3-numpy cmake ninja-build` via
+  `awalsh128/cache-apt-pkgs-action@v1` so the apt download is
+  cached.
+* Configures, builds, and runs `ctest --schedule-random
+  --output-on-failure` against `Multigrid/build-test`.
+* On failure uploads CTest's `LastTest.log` and any
+  `convergence_run_*/` working directories so postmortem does
+  not require re-running locally.
+* `timeout-minutes: 15` -- expected wall time is ~3 minutes.
+
+"Resolved" lands fully when the first push reaches GitHub and
+the workflow goes green; any tweaks to the YAML after that
+first real run should be isolated commits.
 
 ### 18. `Boundary_plan.md` and `CellCentred_plan.md` are historical artefacts (resolved)
 

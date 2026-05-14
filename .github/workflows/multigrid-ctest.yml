@@ -1,0 +1,69 @@
+name: Multigrid CTest
+
+# Path-filtered: only runs when the Multigrid subproject (or this
+# workflow file itself) changes, so commits to sibling subprojects in
+# this monorepo do not spend runner minutes here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Multigrid/**'
+      - '.github/workflows/multigrid-ctest.yml'
+  pull_request:
+    paths:
+      - 'Multigrid/**'
+      - '.github/workflows/multigrid-ctest.yml'
+
+# Cancel an in-progress run for the same ref when a new commit lands,
+# so a fast follow-up push doesn't double-bill runner minutes.
+concurrency:
+  group: multigrid-ctest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ctest:
+    name: build + ctest on ubuntu-24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        # MPI + HDF5 (C + High-Level) for the solver; python3-h5py +
+        # python3-numpy for the test verifiers; cmake + ninja for the
+        # build itself.  cache-apt-pkgs-action saves the apt download
+        # tarball keyed on the package list so reruns are cheap.
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: mpi-default-dev libhdf5-dev libhdf5-hl-dev python3-h5py python3-numpy cmake ninja-build
+          version: 1.0
+
+      - name: Configure
+        run: cmake -S Multigrid -B Multigrid/build-test -DBUILD_TESTING=ON -G Ninja
+
+      - name: Build
+        run: cmake --build Multigrid/build-test --parallel
+
+      - name: Run CTest
+        # --schedule-random catches inter-test ordering assumptions.
+        # --output-on-failure dumps the failing test's stdout/stderr
+        # directly into the GitHub log so first-level diagnosis needs
+        # no artifact download.
+        run: ctest --test-dir Multigrid/build-test --output-on-failure --schedule-random
+
+      - name: Upload test artifacts on failure
+        # Captures the CTest LastTest.log plus any convergence_run_*
+        # working directories that the convergence scripts leave behind
+        # for postmortem.  Only fires when one of the previous steps
+        # failed -- a successful run uploads nothing.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-failure-${{ github.run_id }}
+          path: |
+            Multigrid/build-test/Testing/Temporary/LastTest.log
+            Multigrid/build-test/src/tests/convergence_run_*/
+          if-no-files-found: ignore
+          retention-days: 14
