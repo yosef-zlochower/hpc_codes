@@ -37,7 +37,9 @@ jobs:
         # tarball keyed on the package list so reruns are cheap.
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: mpi-default-dev libhdf5-dev libhdf5-hl-dev python3-h5py python3-numpy cmake ninja-build
+          # Note: on Ubuntu 24.04 the HL library is bundled into
+          # libhdf5-dev -- there is no separate libhdf5-hl-dev package.
+          packages: mpi-default-dev libhdf5-dev python3-h5py python3-numpy cmake ninja-build
           version: 1.0
 
       - name: Configure
