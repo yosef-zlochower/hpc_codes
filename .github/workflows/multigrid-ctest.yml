@@ -41,6 +41,11 @@ jobs:
           # libhdf5-dev -- there is no separate libhdf5-hl-dev package.
           packages: mpi-default-dev libhdf5-dev python3-h5py python3-numpy cmake ninja-build
           version: 1.0
+          # OpenMPI registers mpicc / mpicxx via update-alternatives in
+          # its postinst script.  Without execute_install_scripts the
+          # cache extracts the .debs but skips postinst, so on a cache
+          # hit the wrappers are missing and find_package(MPI) fails.
+          execute_install_scripts: true
 
       - name: Configure
         run: cmake -S Multigrid -B Multigrid/build-test -DBUILD_TESTING=ON -G Ninja
