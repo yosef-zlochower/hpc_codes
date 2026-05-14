@@ -458,7 +458,7 @@ test on a 16-cube run confirms `/Var0`, `/Var1`, `/Var2`
 datasets in the per-rank HDF5 file when both flags are on,
 and `/Var0` alone otherwise.
 
-### 17. No CI configuration (resolved -- pending first-run verification)
+### 17. No CI configuration (resolved)
 
 **Resolved.**  Added
 `.github/workflows/multigrid-ctest.yml` at the monorepo root
@@ -470,20 +470,30 @@ only at the top-level `.github/`).  The workflow:
   monorepo subprojects do not spend runner minutes here.
 * Cancels in-progress runs for the same ref on a new commit
   (`concurrency: cancel-in-progress: true`).
-* Installs `mpi-default-dev libhdf5-dev libhdf5-hl-dev
-  python3-h5py python3-numpy cmake ninja-build` via
-  `awalsh128/cache-apt-pkgs-action@v1` so the apt download is
-  cached.
+* Installs `mpi-default-dev libhdf5-dev python3-h5py
+  python3-numpy cmake ninja-build` via plain `apt-get`.  An
+  earlier attempt to cache the apt payload via
+  `awalsh128/cache-apt-pkgs-action@v1` failed on the first
+  cache hit because OpenMPI registers `mpicc` / `mpicxx`
+  through `update-alternatives` in its postinst script, and
+  the action skipped postinst on cache hits even with
+  `execute_install_scripts: true` set.  Direct `apt-get` is
+  ~10-20 s slower per run -- a price worth paying for
+  consistency.
 * Configures, builds, and runs `ctest --schedule-random
   --output-on-failure` against `Multigrid/build-test`.
 * On failure uploads CTest's `LastTest.log` and any
   `convergence_run_*/` working directories so postmortem does
   not require re-running locally.
-* `timeout-minutes: 15` -- expected wall time is ~3 minutes.
+* `timeout-minutes: 15` -- observed wall time ~2 minutes
+  (15/15 green).
 
-"Resolved" lands fully when the first push reaches GitHub and
-the workflow goes green; any tweaks to the YAML after that
-first real run should be isolated commits.
+CI immediately paid for itself on the first green-ish run by
+catching that `Multigrid/scripts/make_xdmf.py` -- referenced
+by `run_test_make_xdmf.sh` -- existed locally but had never
+been `git add`'d.  Local ctest passed because the file was
+physically present; only CI's fresh checkout exposed the
+gap.
 
 ### 18. `Boundary_plan.md` and `CellCentred_plan.md` are historical artefacts (resolved)
 
