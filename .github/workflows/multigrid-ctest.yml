@@ -33,19 +33,20 @@ jobs:
       - name: Install build and test dependencies
         # MPI + HDF5 (C + High-Level) for the solver; python3-h5py +
         # python3-numpy for the test verifiers; cmake + ninja for the
-        # build itself.  cache-apt-pkgs-action saves the apt download
-        # tarball keyed on the package list so reruns are cheap.
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          # Note: on Ubuntu 24.04 the HL library is bundled into
-          # libhdf5-dev -- there is no separate libhdf5-hl-dev package.
-          packages: mpi-default-dev libhdf5-dev python3-h5py python3-numpy cmake ninja-build
-          version: 1.0
-          # OpenMPI registers mpicc / mpicxx via update-alternatives in
-          # its postinst script.  Without execute_install_scripts the
-          # cache extracts the .debs but skips postinst, so on a cache
-          # hit the wrappers are missing and find_package(MPI) fails.
-          execute_install_scripts: true
+        # build itself.  Direct apt-get (not cache-apt-pkgs-action)
+        # because OpenMPI installs mpicc / mpicxx through
+        # update-alternatives in its postinst -- some cache actions
+        # extract .debs without running postinst, which leaves the
+        # wrappers unconfigured and find_package(MPI) failing.
+        # The full install is ~10 s; not worth the cache complexity.
+        # Note: on Ubuntu 24.04 the HL library is bundled into
+        # libhdf5-dev -- there is no separate libhdf5-hl-dev package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mpi-default-dev libhdf5-dev \
+            python3-h5py python3-numpy \
+            cmake ninja-build
 
       - name: Configure
         run: cmake -S Multigrid -B Multigrid/build-test -DBUILD_TESTING=ON -G Ninja
