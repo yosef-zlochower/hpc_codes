@@ -402,21 +402,14 @@ unchanged.  A future grep for either name now finds only one
 match and the per-translation-unit purpose is clear from the
 identifier alone.
 
-### 12. `HDF5BinaryWrite.c` `MAX_TRACKED = 32` could silently overflow
+### 12. `HDF5BinaryWrite.c` `MAX_TRACKED = 32` could silently overflow (resolved — wontfix)
 
-**What.**  The "seen files" tracker (`HDF5BinaryWrite.c:227`)
-caps at 32 distinct filenames.  Past that, `mark_file_seen`
-silently returns (`HDF5BinaryWrite.c:241`), which would cause the
-*next* write to the 33rd filename to trigger the "refuse to
-overwrite" branch (which would abort).  In practice each rank
-writes one file, so this is fine.  But the silent return is
-worth a `fprintf(stderr, ...)` warning at least, so a future
-extension that writes many files doesn't get a confusing
-"refusing to overwrite" diagnostic on a file it just created.
-
-**Suggested fix.**  Either dynamic-allocate the tracker (no fixed
-cap), or print a warning when the cap is hit so failure is
-explicit.
+**Wontfix.**  The architecture writes exactly one filename per
+rank (`rank_<R>.h5`); the tracker therefore has exactly one
+entry even with the §16 VAR_DEF / VAR_RHS dumps, since those
+append datasets to the same file.  The cap is 32x over-budget
+already, and warning for a state the current code cannot reach
+is the kind of speculative validation we avoid.
 
 ### 13. `TODO: FIX` markers in test_domain_3d.c (resolved)
 
