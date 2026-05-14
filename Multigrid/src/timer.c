@@ -22,11 +22,11 @@ static double get_time(void)
     return (tv.tv_sec) + 1.0e-6 * tv.tv_usec;
 }
 
-#define NAME_LENGTH 1024
+#define TIMER_NAME_LENGTH 1024
 #define NUM_TIMERS 20
 struct timer
 {
-    char name[NAME_LENGTH];
+    char name[TIMER_NAME_LENGTH];
     int active;
     int currently_timing;
     double total_time;
@@ -94,14 +94,14 @@ int register_timer(const char *name)
     {
         initialize_timers();
     }
-    if (strlen(name) >= NAME_LENGTH)
+    if (strlen(name) >= TIMER_NAME_LENGTH)
     {
         fprintf(stderr, "Timer name too long\n");
         exit(-1);
     }
 
-    strncpy(timers[active_timers].name, name, NAME_LENGTH - 1);
-    timers[active_timers].name[NAME_LENGTH - 1] = '\0';
+    strncpy(timers[active_timers].name, name, TIMER_NAME_LENGTH - 1);
+    timers[active_timers].name[TIMER_NAME_LENGTH - 1] = '\0';
 
     int timer_id = active_timers;
     active_timers++;

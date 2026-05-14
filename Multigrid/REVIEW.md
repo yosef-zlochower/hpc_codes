@@ -384,17 +384,13 @@ inline.
 `const struct ngfs_*d *`.  No call site needs to be modified; the
 const propagation is purely additive.
 
-### 11. Two `name_length` macros at `20` and `1024` shadow each other
+### 11. Two `name_length` macros at `20` and `1024` shadow each other (resolved)
 
-**What.**  `src/gf.c:46` defines `name_length = 20` (the length of
-a variable-name buffer); `src/timer.c:25` defines `#define
-NAME_LENGTH 1024` (the length of a timer name).  They're in
-separate translation units so they don't actually conflict, but
-grepping the codebase for "NAME_LENGTH" returns both with no
-indication that one is per-variable and one is per-timer.
-
-**Suggested fix.**  Either remove `timer.c` (per item 3) or rename
-to `TIMER_NAME_LENGTH` to disambiguate.
+**Resolved** by renaming `timer.c`'s `NAME_LENGTH` to
+`TIMER_NAME_LENGTH`.  `gf.c`'s local `name_length = 20` stays
+unchanged.  A future grep for either name now finds only one
+match and the per-translation-unit purpose is clear from the
+identifier alone.
 
 ### 12. `HDF5BinaryWrite.c` `MAX_TRACKED = 32` could silently overflow
 
