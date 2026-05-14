@@ -269,7 +269,17 @@ int main(int argc, char **argv)
     }
     MPI_Barrier(gfs.domain.cart_comm);
 
-    output_3d_gf(&gfs, 0, param.output_dir);
+    output_3d_gf(&gfs, VAR_SOL, param.output_dir);
+    /* Optional defect and RHS dumps -- enabled by [output] write_defect /
+     * write_rhs in the TOML.  VAR_DEF is fresh because every solve path
+     * (vcycle_3d's final post-smooth defect compute, or the explicit
+     * calc_defect_3d after gauss_seidel_3d in the non-multigrid branch)
+     * writes it on the last outer iteration; VAR_RHS is set once by
+     * problem_initialise_rhs and never modified. */
+    if (param.write_defect)
+        output_3d_gf(&gfs, VAR_DEF, param.output_dir);
+    if (param.write_rhs)
+        output_3d_gf(&gfs, VAR_RHS, param.output_dir);
 
     /* ---- Cleanup ---- */
     ngfs_3d_deallocate(&gfs);

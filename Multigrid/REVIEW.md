@@ -451,18 +451,19 @@ broader 2D removal (item 2).
 field-comparing verifiers are now pure 3D, each ~20 lines
 shorter and free of the `is_3d`/`ndim == 2` branches.
 
-### 16. Driver only outputs `VAR_SOL`
+### 16. Driver only outputs `VAR_SOL` (resolved)
 
-**What.**  `driver_multigrid.c:256` -- `output_3d_gf(&gfs, 0,
-param.output_dir)` writes only VAR_SOL.  The defect and RHS are
-in the same `ngfs_3d` but never written.  For
-debugging a stall the defect is exactly what you want to inspect.
-
-**Where.**  `src/driver_multigrid.c:256`.
-
-**Suggested fix.**  Trivial: add two more calls.  Maybe gate them
-behind a `[output] write_defect = true / write_rhs = true` pair
-of optional TOML keys.
+**Resolved** by adding optional `[output] write_defect` and
+`[output] write_rhs` boolean keys (default false, so back-compat
+is preserved -- existing TOMLs continue to dump only VAR_SOL).
+When set true the driver emits `output_3d_gf(&gfs, VAR_DEF, ...)`
+and `output_3d_gf(&gfs, VAR_RHS, ...)` after the solve, alongside
+the existing VAR_SOL dump.  The keys live under `[output]` in
+the parser allowlist, so a typo (`write_defct = true`) is
+rejected at parse time rather than silently ignored.  Smoke
+test on a 16-cube run confirms `/Var0`, `/Var1`, `/Var2`
+datasets in the per-rank HDF5 file when both flags are on,
+and `/Var0` alone otherwise.
 
 ### 17. No CI configuration
 

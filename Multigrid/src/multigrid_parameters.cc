@@ -146,6 +146,16 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
         std::strncpy(param->output_dir, dir.c_str(),
                      sizeof(param->output_dir) - 1);
         param->output_dir[sizeof(param->output_dir) - 1] = '\0';
+
+        /* Optional per-variable dump flags.  Default false: only VAR_SOL
+         * is written (back-compat).  Setting either to true causes the
+         * driver to call output_3d_gf for that variable after the solve. */
+        param->write_defect = (output_section && output_section->contains("write_defect"))
+            ? (parameters::get_boolean_value("output", "write_defect", tbl) ? 1 : 0)
+            : 0;
+        param->write_rhs = (output_section && output_section->contains("write_rhs"))
+            ? (parameters::get_boolean_value("output", "write_rhs", tbl) ? 1 : 0)
+            : 0;
     }
 
     /* Reject any TOML entry that isn't in the documented schema.  This
@@ -170,7 +180,7 @@ extern "C" int parse_parameter_file(struct param_st *param, const char *fname)
     parameters::check_known_keys(tbl, "problem",
         { "name" });
     parameters::check_known_keys(tbl, "output",
-        { "dir" });
+        { "dir", "write_defect", "write_rhs" });
 
     return parameters::error_count();
 }

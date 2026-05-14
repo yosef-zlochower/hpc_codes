@@ -57,6 +57,13 @@ struct param_st
                                                    * is absent.  Driver
                                                    * mkdir-p's it from rank 0
                                                    * before writing. */
+    int     write_defect;  /* [output] write_defect: 1 -> also dump VAR_DEF
+                            * to the per-rank HDF5 file after the solve.
+                            * Default 0 (back-compat: only VAR_SOL is
+                            * written).  Useful for debugging a V-cycle
+                            * stall by inspecting the per-cell residual. */
+    int     write_rhs;     /* [output] write_rhs: 1 -> also dump VAR_RHS
+                            * (the manufactured source term).  Default 0. */
 };
 
 /* parse_parameter_file is callable from C and C++.  In C++ the
