@@ -382,20 +382,17 @@ time:
 GitHub / Zenodo / `licensee` will now identify the project as
 GPL-3.0.
 
-### 10. `gf_indx_3d` takes a non-const pointer
+### 10. `gf_indx_3d` takes a non-const pointer (resolved)
 
-**What.**  `static inline int64_t gf_indx_3d(struct ngfs_3d *gfs, ...)`
-(`gf.h:126`) is a pure function (uses `gfs->nx`, `gfs->ny` to
-compute an index) but takes `struct ngfs_3d *` rather than
-`const struct ngfs_3d *`.  Forces callers that hold a const
-pointer to either cast away const or duplicate the formula
-inline.
-
-**Where.**  `src/gf.h:108`, `src/gf.h:126`.
-
-**Suggested fix.**  Change both prototypes (2d and 3d) to take a
-`const struct ngfs_*d *`.  No call site needs to be modified; the
-const propagation is purely additive.
+**Resolved** by changing the parameter type to
+`const struct ngfs_3d *` at `src/gf.h:79` and updating the
+docstring to match.  Purely additive: no call site needed to be
+modified, since C permits passing a `T*` where a `const T*` is
+expected.  Future const-correct refactors (test verifiers,
+restriction helpers reading the parent, etc.) can now pass a
+`const` pointer through `gf_indx_3d` directly.  The 2D variant
+mentioned in the original item is gone with the broader 2D
+removal (item 2).
 
 ### 11. Two `name_length` macros at `20` and `1024` shadow each other (resolved)
 

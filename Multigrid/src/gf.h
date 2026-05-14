@@ -67,7 +67,7 @@ struct ngfs_3d
 * Purpose: Compute the flat 1D array index for grid point (i, j, k)
 *     using row-major ordering with i as the fastest-varying index.
 * Input Variables:
-*     gfs: struct ngfs_3d*, grid function container, used to read nx and ny
+*     gfs: const struct ngfs_3d*, grid function container, used to read nx and ny
 *     i: int64_t, local x-index
 *     j: int64_t, local y-index
 *     k: int64_t, local z-index
@@ -76,7 +76,7 @@ struct ngfs_3d
 * Return Values and indicators of success / failure
 *     int64_t flat index: i + (j + k * gfs->ny) * gfs->nx
 *******************************************************************/
-static inline int64_t gf_indx_3d(struct ngfs_3d *gfs, int64_t i, int64_t j, int64_t k)
+static inline int64_t gf_indx_3d(const struct ngfs_3d *gfs, int64_t i, int64_t j, int64_t k)
 {
     return i + (j + k * gfs->ny) * gfs->nx;
 }
