@@ -1,0 +1,89 @@
+name: Maxwell_Kokkos CTest
+
+# Path-filtered: only runs when the Maxwell_Kokkos subproject (or this
+# workflow file itself) changes, so commits to sibling subprojects in
+# this monorepo do not spend runner minutes here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Maxwell_Kokkos/**'
+      - '.github/workflows/maxwell-kokkos-ctest.yml'
+  pull_request:
+    paths:
+      - 'Maxwell_Kokkos/**'
+      - '.github/workflows/maxwell-kokkos-ctest.yml'
+
+# Cancel an in-progress run for the same ref when a new commit lands,
+# so a fast follow-up push doesn't double-bill runner minutes.
+concurrency:
+  group: maxwell-kokkos-ctest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ctest:
+    name: build + ctest on ubuntu-24.04 (Kokkos OpenMP)
+    runs-on: ubuntu-24.04
+    # Kokkos itself takes ~5 min to compile on a 4-vCPU runner; the
+    # 27-rank oversubscribed sync test is the long tail in ctest.  20
+    # min is comfortable headroom on top of a typical ~10-12 min run.
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # Kokkos is vendored as a git submodule at
+          # Maxwell_Kokkos/src/kokkos -- the build will fail to find
+          # KokkosConfigCommon.cmake without it.
+          submodules: recursive
+
+      - name: Install build and test dependencies
+        # MPI + HDF5 (C + High-Level) for the solver; python3-numpy +
+        # python-is-python3 for the verifier (tests/run_tests.sh calls
+        # `python verify.py`, but Ubuntu 24.04 only ships /usr/bin/python3
+        # by default).  cmake + ninja for the build itself.  Direct
+        # apt-get (not cache-apt-pkgs-action) because OpenMPI installs
+        # mpicc/mpicxx through update-alternatives in its postinst --
+        # some cache actions extract .debs without running postinst,
+        # which leaves the wrappers unconfigured and find_package(MPI)
+        # failing.  HL is bundled into libhdf5-dev on 24.04 -- there is
+        # no separate libhdf5-hl-dev package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mpi-default-dev libhdf5-dev \
+            python3-numpy python-is-python3 \
+            cmake ninja-build
+
+      - name: Configure
+        # OpenMP backend is the default in src/CMakeLists.txt -- no GPU
+        # toolchain needed on the runner.  The top-level CMakeLists.txt
+        # is a thin wrapper that calls add_subdirectory(src).
+        run: cmake -S Maxwell_Kokkos -B Maxwell_Kokkos/build -G Ninja
+
+      - name: Build
+        run: cmake --build Maxwell_Kokkos/build --parallel
+
+      - name: Run CTest
+        # --output-on-failure dumps the failing test's stdout/stderr
+        # directly into the GitHub log so first-level diagnosis needs
+        # no artifact download.  Only one ctest test is registered
+        # (the run_tests.sh wrapper, which contains 14 sub-tests), so
+        # --schedule-random would have no effect.
+        run: ctest --test-dir Maxwell_Kokkos/build --output-on-failure
+
+      - name: Upload test artifacts on failure
+        # Captures the CTest LastTest.log plus any Var0_rank_*.json
+        # files that test_sync leaves behind on a failed run (the
+        # script rm's them on success).  Only fires when one of the
+        # previous steps failed -- a successful run uploads nothing.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-failure-${{ github.run_id }}
+          path: |
+            Maxwell_Kokkos/build/Testing/Temporary/LastTest.log
+            Maxwell_Kokkos/build/tests/Var0_rank_*.json
+          if-no-files-found: ignore
+          retention-days: 14
