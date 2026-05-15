@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Companion to the sibling directory `Maxwell/`. The design document is `../Maxwell/Develop_Penalty.md`; read that first if the SBP-SAT boundary treatment is unclear.
+The design document is `Develop_Penalty.md` (at this directory); read that first if the SBP-SAT boundary treatment is unclear. It is a historical work plan — see its prepended note for how its forward references should now be read.
 
 ## Build Commands
 
@@ -37,26 +37,65 @@ mpirun -np <N> ./maxwell_system maxwell.toml
 
 Default `maxwell.toml` runs the beam-through-lens demo (Option A): Gaussian beam injected at the lower-z face, all six faces non-periodic with SBP-SAT, elliptical-permittivity lens in the middle of the box. Switch `source_type = "plane_wave"` with `periodic_x = periodic_y = true` for the Option B convergence reference.
 
-## Key differences from `Maxwell/`
+## Architecture
 
-The physics (extended Maxwell with constraint damping), infrastructure (domain/comm/rk4/io/checkpoint), analytic sources beyond the beam, and test binaries are identical. What changed:
+The code evolves the **extended Maxwell system with hyperbolic constraint damping**: 9 evolved variables `(Dx, Dy, Dz, Bx, By, Bz, PsiD, PsiB, rho)` plus 5 auxiliary fields `(ieps, imu, sigma, cD, cB)`. The RHS enforces the divergence constraints `∇·D = 4π ρ` and `∇·B = 0` through the `PsiD`/`PsiB` scalars with damping coefficients `kappa_D` / `kappa_B`.
 
-1. **`maxwell_eqs.c` is rewritten.** Strong characteristic injection on the z-faces is replaced by SBP-SAT penalties on *every* physical face. The function `maxwell_eq_time_deriv` has two loops: a fast deep-interior loop with fixed `D4CEN` stencils, and a boundary-shell sweep that dispatches per-axis stencils at runtime (`stencil_at`, `apply_stencil`). Six `APPLY_SAT_*_{X,Y,Z}` macros add the penalty at each boundary row. At edges and corners the SATs are additive — two or three fire at once; no edge-specific code is needed. `maxwell_constraints` uses the same layout so `cD`, `cB` are valid at every SBP row.
+### Layer structure (bottom to top)
 
-2. **`derivatives.h`** gains four `SBP42_HINV_{0..3}` constants — only `HINV_0` is actually used (SAT only fires at the exact boundary row).
+1. **`domain.{c,h}`** — MPI Cartesian decomposition. `setup_3d_domain` builds the Cartesian communicator and calls `setup_1d_domain` per axis, recording neighbour ranks, local sizes, ghost widths, and per-face physical-boundary flags (`bbox3D_st`). `automatic_topology` factorises `nproc` and assigns primes to the longest remaining dimension.
 
-3. **`analytic_solutions.{c,h}`** gains `incoming_gaussian_beam` — a paraxial collimated beam linearly polarised in x, travelling in +z. It includes a smooth `f(t, ramp_a, ramp_b)` turn-on in time (interval set under `[source.gaussian_beam]`; default `[0, 1]`): at `t ≤ ramp_a` the source is zero, ramping to full by `t ≥ ramp_b`. This turn-on is essential — filling the domain at `t = 0` with the paraxial beam (which is not an exact solution of the discrete Maxwell PDE) seeds an instability that grows exponentially even at tiny amplitudes. The ramp lets the scheme adjust to the paraxial data as it enters through the SAT boundary. Lengthen it if you see growth during turn-on at high `k·w0`. The paraxial residual is `O(1/(k·w0)²)` and is absorbed by the `PsiD`, `PsiB` constraint-damping fields.
+2. **`gf.{c,h}`** — Grid function containers. `struct gf` holds `new`/`old`/`dot`/`K1..K4` arrays (RK4 scratch). `struct ngfs` aggregates all variables, domain info, grid spacings, and the per-axis ghost-exchange state (see `comm.h`). Index macro: `ijk_indx(i,j,k) = i + j*nx + k*nx*ny` (i fastest). Storage layout matches the DIFFX/DIFFY/DIFFZ stride conventions (`di=1`, `dj=nx`, `dk=nx*ny`).
 
-4. **`parameter.{h,cc}`, `maxwell.toml`** gain:
+3. **`comm.{c,h}`** — Ghost-zone sync. Each axis owns a `struct comm_axis { face_buffers lower; face_buffers upper; size_t face_size; }`, where `face_buffers` is a `{src, dst}` pair of contiguous double buffers. `sync_vars(gfs, EVOLVED|AUX)` packs `->dot` for all variables of the requested type into `ax->lower.src` / `ax->upper.src`, exchanges via non-blocking MPI on the Cartesian comm, and unpacks from `ax->lower.dst` / `ax->upper.dst` into ghost regions — axis by axis (x, y, z). Note: the packed field is `->dot`, not `->new`; the RK4 step writes its working state to `dot` between stages, so driver code sometimes aliases `dot = new` before calling `sync_vars` (see `driver.c` sync test).
+
+4. **`derivatives.h`** — Centred finite-difference stencils (`D2CEN`, `D4CEN`, `D6CEN`, `D8CEN`), upwind variants, SBP 4-2 one-sided boundary operators, and four `SBP42_HINV_{0..3}` norm-inverse boundary weights for the SAT. Each stencil takes `(f, i, di, h)`, so the same operator works along any axis by passing the appropriate stride.
+
+5. **`rk4.{c,h}`** — Classical 4-stage Runge-Kutta. `RK4_Step` stores `K1..K4`, invokes the user-supplied `dotfunction(gfs, t)` at each stage, and updates `->new`. CFL: `dt = cfl_factor * min(dx,dy,dz)`. Loop indices use `int64_t`.
+
+6. **`maxwell_eqs.{c,h}`** — Physics RHS, written in the **SBP-SAT** scheme. `maxwell_eq_time_deriv` is split into two loops: a fast deep-interior loop with fixed `D4CEN` stencils, and a boundary-shell sweep that dispatches per-axis stencils at runtime (`stencil_at`, `apply_stencil`) — SBP 4-2 closures on the four boundary-adjacent rows, centred in the interior. Six `APPLY_SAT_*_{X,Y,Z}` macros add the SAT penalty `-τ · (48/17) / h · A±_axis · (u - g)` at each physical boundary row. At edges and corners the SATs are additive — two or three fire at once; no edge-specific code is needed. `maxwell_constraints` uses the same layout so `cD`, `cB` are valid at every SBP row. `simple_maxwell.h` (interior flux) is generated by `generate_ccode.py` from SymPy (regenerate with `python generate_ccode.py && clang-format -i simple_maxwell.h`).
+
+7. **`analytic_solutions.{c,h}`** — Closed-form sources used for initial data, SBP-SAT boundary forcing (the `g` in the formula above), and L2 error measurement: `plane_wave`, `gaussian_beam`, `te_waveguide_mode`. The `source_type` TOML key picks among them; each one has its own parameter sub-table under `[source.<name>]`.
+
+8. **`io.{c,h}`** + **`HDF5BinaryWrite.{c,h}`** — Per-rank HDF5 output (`3D_rank_<rank>.h5`) plus gnuplot 2D slices. Static counters track output group names; `set_output_counter_3D` resets them on checkpoint recovery. Checkpoint files (`checkpoint_rank_<rank>.h5`) are written atomically via `.tmp` → `rename` with `MPI_Barrier` fences; `max_checkpoints` bounds the number of retained sets. See `src/Checkpoint.md` for the design doc and invariants (what *is* and *isn't* checkpointed).
+
+9. **`parameter.{cc,h}` + `maxwell_parameters.cc` + `toml.hpp`** — TOML parser in C++ with an `extern "C"` entry point (`parse_maxwell_parameters`) so `driver.c` can link to it. `parameters::get_*` helpers centralise error counting and type checking.
+
+10. **`timer.{c,h}`** — Hierarchical wall-clock timers (`register_timer("/path")`, `BEGIN_TIMER` / `END_TIMER` macros, `print_timers`).
+
+### Evolved-variable index contract
+
+`DECLARE_EVOLVED_VARS` / `DECLARE_AUX_VARS` macros in `maxwell_eqs.h` bind `Dx…rho`, `dotDx…dotrho`, `ieps`, `imu`, `sigma`, `cD`, `cB`, and the stride constants `di/dj/dk` as local variables inside any function that touches the RHS. The order of `gfs->vars[0..8]` and `gfs->auxvars[0..4]` is fixed by these macros and by the `N_EVOL` / `N_AUX` enums in `maxwell_eqs.h`. The driver tags each grid function via the slot-indexed `evolved_field_names` / `aux_field_names` tables — changing the slot ordering silently breaks every physics routine.
+
+### Scripts and docs
+
+- `scripts/` — SymPy derivations and Jupyter notebooks (`MaxwellSystemAndAlgorithm.ipynb`, `SimpleMaxwell.ipynb`, `analytic_solution.ipynb`, `incoming_wave.ipynb`), the `convergence_test.py` driver, `make_xdmf.py` / `hdf5_to_vtk.py` post-processors, and SLURM submit scripts (`omp_mpi.sub`, `pure_mpi.sub`).
+- `doc/documentation.tex` — write-up of the SBP-SAT method and the lens demo (PDF in `doc/documentation.pdf`).
+- `Develop_Penalty.md` (at this directory), `src/Checkpoint.md` — design docs; read these before modifying boundary conditions or the checkpoint/recovery flow.
+
+## Implementation notes specific to this code
+
+The headline departure from a "centred + strong-injection" Maxwell baseline:
+
+1. **SBP-SAT on every physical face.** `maxwell_eq_time_deriv` keeps the full PDE RHS at the boundary row and *adds* a penalty `-τ · (48/17) / h_axis · A±_axis · (u - g)` (with `A±_axis` the positive/negative-eigenvalue part of the axis flux Jacobian). This replaces the older strong-injection approach in which the z-face row was overwritten by `0.5 * (outgoing RHS) + 0.5 * (incoming data)`. The SAT scheme gives a discrete energy estimate when `τ ≥ 1/2` (default `1.0`) and works uniformly on every axis — the z-only-vs-all-six distinction is now just a TOML setting (`periodic_x`, `periodic_y`, `periodic_z`).
+
+2. **SAT macros were re-derived from scratch** against the PDE flux signs in `simple_maxwell.h` and verified against the simple traveling-wave solution: an x-polarised +z wave `(Dx, By) = (ψ, ψ)` with all other components zero gives `w⁺ = By + PP·Dx = 2·ψ` incoming — nonzero, as physics demands. (A SAT formulation that gives `w⁺ = 0` for this state would silently produce no boundary injection for traveling-wave data; that was a real bug in an earlier hand-derivation, and is the reason the comment block in `maxwell_eqs.c` shows the explicit sign derivation.)
+
+3. **Paraxial Gaussian beam source** (`incoming_gaussian_beam` in `analytic_solutions.{c,h}`) — a paraxial collimated beam linearly polarised in x, travelling in +z. The fields are built from a **Hertz-potential construction**: `D = ∇ × ∇ × (x̂ Φ)`, `B = ∂_t ∇ × (x̂ Φ)`, where `Φ` is the paraxial Gaussian "Hertz amplitude" `E0 · (w0/w(z)) · exp(−r²/w(z)²) / k²`. Because the divergence of a curl is identically zero, **the constraints `∇·D = 0` and `∇·B = 0` are satisfied exactly at every point**, for every `t`, regardless of `Φ`. The source therefore sets `PsiD = PsiB = 0` initially. What is *not* satisfied exactly is the dynamical Maxwell flow (Faraday / Ampère): those would require `Φ` to solve the full scalar wave equation, but the paraxial Gaussian solves only the paraxial equation `(∇²_⊥ + 2ik ∂_z) Φ = 0` — the dropped `∂²_z Φ` term is the source of an `O(1/(k·w0)²)` curl-equation residual that drives a small constraint *drift* during evolution, which `PsiD`, `PsiB` damp away.
+
+   The beam also includes a smooth `f(t, ramp_a, ramp_b)` turn-on in time (interval set under `[source.gaussian_beam]`; default `[0, 1]`): at `t ≤ ramp_a` the source is zero, ramping to full by `t ≥ ramp_b`. This turn-on is essential — filling the domain at `t = 0` with the paraxial beam seeds an instability that grows exponentially even at tiny amplitudes (the failure is dynamical, not constraint-related: the paraxial profile is divergence-free but is not a fixed point of the discrete flux). The ramp lets the scheme reach the paraxial profile as a quasi-steady inflow through the SAT boundary instead of having to absorb it instantaneously. Lengthen it if you see growth during turn-on at high `k·w0`.
+
+4. **Parameter file additions** (`parameter.{h,cc}`, `maxwell.toml`):
    - `solver.tau` — SBP-SAT penalty strength (≥ 0.5 required; default 1.0).
-   - `source.source_type` — `"plane_wave"` or `"gaussian_beam"`.
-   - `[beam]` section — `w0`, `z_waist`, `k`, `amplitude`.
+   - `source.source_type` — `"plane_wave"`, `"gaussian_beam"`, or `"te_waveguide_mode"`.
+   - `[source.gaussian_beam]` section — `w0`, `z_waist`, `k`, `amplitude`, `ramp_a`, `ramp_b`.
+   - `[material.elliptical]` section — `max`, `x0`, `z0`, `s`, `a`, `b` for the elliptical-permittivity lens used in the default demo.
 
-5. **`driver.c`** relaxes the initial-sync L2 check for the beam source (the paraxial source is not exact; roundoff-tight bound would reject the valid initial state).
+5. **Initial-sync L2 check stays tight (`1.0e-8`) for every source type.** `driver.c` compares `sync_vars`-filled ghosts against the analytic source recomputed at the same `t`; since both sides come from the same `source()` call, any paraxial-vs-PDE residual cancels and what's left is communication error, which should be at roundoff regardless of how inexact the source is as a PDE solution. The comment block in `driver.c` documents this reasoning explicitly. (The tolerance constant is hoisted to a named `sync_tol`; there is no `source_type`-aware branch.)
 
 ## Stability notes
 
-- **CFL is tighter than `Maxwell/`.** The existing code ran at `cfl_factor = 0.5`. Option B (z-only SAT) tolerates the same. Option A (all six faces) needs `cfl_factor ≤ 0.2` because three SATs stack at corners and the combined stiffness can overrun RK4's stability limit. The default TOML ships with `0.4` — bump to `0.2` if you see explosive L2 growth.
+- **CFL is tighter than a pure centred scheme.** A centred-stencil periodic Maxwell run is happy at `cfl_factor = 0.5`. Option B (z-only SAT, periodic x,y) tolerates the same. Option A (SAT on all six faces) needs `cfl_factor ≤ 0.2` because three SATs stack at corners and the combined stiffness can overrun RK4's stability limit. The default TOML ships with `0.4` — bump to `0.2` if you see explosive L2 growth.
 - **The "plane wave filled in Option A" is physically unstable, not a code bug.** A plane wave is constant in x,y, so it has full-amplitude values at the transverse walls. The `g = 0` SAT there tries to force them to zero, generating spurious reflections that cascade. This is the exact limitation discussed in `Develop_Penalty.md §6`. Use Option B (periodic x,y) for plane-wave tests, and keep Option A for well-contained beams whose tail at the x/y walls is negligible.
 - **`k * w0` sets the paraxial accuracy.** Residual is `~1/(k·w0)²`. `k·w0 = 3` gives ~10 % residual (diagnostic only); `k·w0 = 6` gives ~3 % (usable for physics). Correspondingly, `Lx / w0 ≥ 10` keeps the wall tail under `exp(-25)` ≈ 1e-11.
 
@@ -119,14 +158,18 @@ For physics runs use `"plane_wave"` (Option B reference) or
 ## Running the infrastructure tests
 
 ```bash
-cd src/build/tests && bash run_tests.sh           # 14 tests: topology, rk4, sync (multiple configs)
+cd build/tests && bash run_tests.sh           # 14 tests: topology, rk4, sync (multiple configs)
 ```
 
-These are bit-identical to `Maxwell/` — the infrastructure files were copied verbatim.
+For top-level builds; from a `src/`-local build use `cd src/build/tests`. Each test can also be invoked directly under MPI:
 
-## Sign convention warning
+```bash
+mpirun --map-by :OVERSUBSCRIBE -np 4 ./test_sync 32 32 32 0 0 0
+mpirun -np 1 ./test_topology
+mpirun -np 1 ./test_rk4
+```
 
-**The SAT formulas in `../Maxwell/src/PenaltyImplementation.md` have wrong signs on the coupling terms** (their `w+ = Bx + Dy/PP` should be `Bx − PP·Dy` for the `(Bx, Dy)` z-axis block, and so on). The macros here were re-derived from scratch using the PDE flux signs in `simple_maxwell.h` and verified against the simple traveling-wave solution: an x-polarised +z wave `(Dx, By) = (ψ, ψ)` with all other components zero gives `w+ = By + PP·Dx = 2·ψ` incoming — nonzero, as physics demands. Do not copy SAT formulas back from `PenaltyImplementation.md` without re-deriving; they produce a scheme in which the boundary injection is silently zero for traveling-wave states.
+`test_sync` writes per-rank `Var0_rank_*.json`; `verify.py` reads them and checks ghost-zone correctness against a known periodic test function.
 
 ## Smoke-test results
 
