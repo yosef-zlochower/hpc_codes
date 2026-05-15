@@ -6,12 +6,26 @@ Companion to the sibling directory `Maxwell/`. The design document is `../Maxwel
 
 ## Build Commands
 
+Either from the project root (out-of-source build alongside `src/`):
+
 ```bash
-cd src
 cmake -S . -B build && cmake --build build -j     # canonical
 ctest --test-dir build                            # runs tests/run_tests.sh
+```
+
+…or from inside `src/` (the top-level `CMakeLists.txt` is just a thin
+wrapper that calls `add_subdirectory(src)`):
+
+```bash
+cd src
+cmake -S . -B build && cmake --build build -j
+ctest --test-dir build
 make maxwell_system                               # Makefile also works
 ```
+
+Top-level builds put the main executable at `build/src/maxwell_system`
+and test binaries at `build/tests/`; `src/`-local builds put them at
+`src/build/maxwell_system` and `src/build/tests/`.
 
 Toolchain: `mpicc` / `mpicxx`, `-Wall -O3 -ffast-math -g -fopenmp`, HDF5 (C+HL).
 
