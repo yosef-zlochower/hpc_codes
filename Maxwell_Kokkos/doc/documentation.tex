@@ -63,7 +63,7 @@ operators with one-sided closures at every physical face.  Boundary
 conditions are imposed weakly via Simultaneous Approximation Term
 (SAT) penalties on all six Cartesian faces.  The time integrator is
 classical fourth-order Runge--Kutta.  The code is the Kokkos port of
-the Week-11 \texttt{Maxwell\_Penalty} reference: the physics and the
+the \texttt{Maxwell\_Penalty} reference: the physics and the
 discretization are unchanged, but every compute kernel is expressed
 as a \texttt{Kokkos::parallel\_for} or \texttt{parallel\_reduce} so
 the same source builds for OpenMP on a CPU host and for CUDA on a
@@ -76,7 +76,7 @@ status, and the appendix with explicit per-face SAT formulas.
 \section{Overview}
 
 \texttt{Maxwell\_Kokkos} is a Kokkos re-implementation of
-\texttt{Maxwell\_Penalty} from Week 11.  The physics, the
+\texttt{Maxwell\_Penalty}.  The physics, the
 discretization, and the user-facing interface (TOML configuration,
 HDF5 output, MPI Cartesian decomposition) are unchanged from the
 parent code; the compute kernels have been ported to
@@ -85,16 +85,16 @@ so the same source builds for OpenMP on a CPU host and for CUDA on
 a single GPU.  Companion documents:
 
 \begin{itemize}[itemsep=2pt,topsep=2pt]
-  \item \texttt{../Week11/Maxwell\_Penalty/CLAUDE.md} --- parent code
+  \item \texttt{../Maxwell\_Penalty/CLAUDE.md} --- parent code
         notes (TOML schema, source types, lens demo, convergence
         rates, SBP--SAT sign convention warnings).
-  \item \texttt{../Week11/Maxwell\_Penalty/doc/documentation.tex}
+  \item \texttt{../Maxwell\_Penalty/doc/documentation.tex}
         --- the parent document this one is partially derived from.
         Many of the physics, characteristic, and limitations
         sections are imported verbatim from there.
-  \item \texttt{../Week11/Maxwell/Develop\_Penalty.md} --- continuum
-        derivation of the SBP--SAT penalty for the extended Maxwell
-        system.
+  \item \texttt{../Maxwell\_Penalty/Develop\_Penalty.md} ---
+        continuum derivation of the SBP--SAT penalty for the extended
+        Maxwell system.
   \item \texttt{GPU\_Maxwell.md} --- the implementation plan that
         produced this code.
   \item \texttt{Report.md} --- focused report on the include and
@@ -497,12 +497,12 @@ in $+\hz$), so
 as expected for an incoming mode.  A sign error that flipped any
 coupling term ($+PP$ instead of $-PP$, say) would give $w^+ = 0$
 on this same physical solution, and the SAT would silently fail to
-inject the wave.  The hand-written sign convention in
-\texttt{Maxwell/src/PenaltyImplementation.md} contains errors of
-exactly this form; the SymPy-emitted macros in
-\texttt{simple\_maxwell.h} are the authoritative version, derived
-from scratch by SymPy diagonalization of $M_a$ and verified
-against the traveling-wave check above.
+inject the wave.  Earlier hand-written sign conventions for this
+system are known to contain errors of exactly this form; the
+SymPy-emitted macros in \texttt{simple\_maxwell.h} are the
+authoritative version, derived from scratch by SymPy
+diagonalization of $M_a$ and verified against the traveling-wave
+check above.
 
 The implementation lives in \texttt{simple\_maxwell.h} as six
 preprocessor macros: \texttt{APPLY\_SAT\_LOWER\_\{X,Y,Z\}} and
@@ -1121,7 +1121,7 @@ File & Origin & Role \\
 
 \subsection{Default OpenMP build}
 \begin{lstlisting}[style=shell]
-cd Week15/Maxwell_Kokkos/src
+cd Maxwell_Kokkos/src
 cmake -S . -B build
 cmake --build build -j
 \end{lstlisting}

@@ -50,7 +50,7 @@
 
 ## 2. Directory and Build Setup
 
-Create `Week11/Maxwell_Penalty/` as a peer of `Maxwell/`, with the same layout:
+Create `Maxwell_Penalty/` as a peer of `Maxwell/`, with the same layout:
 
 ```
 Maxwell_Penalty/
