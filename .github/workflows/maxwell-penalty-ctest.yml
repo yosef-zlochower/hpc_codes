@@ -1,0 +1,80 @@
+name: Maxwell_Penalty CTest
+
+# Path-filtered: only runs when the Maxwell_Penalty subproject (or this
+# workflow file itself) changes, so commits to sibling subprojects in
+# this monorepo do not spend runner minutes here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Maxwell_Penalty/**'
+      - '.github/workflows/maxwell-penalty-ctest.yml'
+  pull_request:
+    paths:
+      - 'Maxwell_Penalty/**'
+      - '.github/workflows/maxwell-penalty-ctest.yml'
+
+# Cancel an in-progress run for the same ref when a new commit lands,
+# so a fast follow-up push doesn't double-bill runner minutes.
+concurrency:
+  group: maxwell-penalty-ctest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ctest:
+    name: build + ctest on ubuntu-24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        # MPI + HDF5 (C + High-Level) for the solver; python3-numpy +
+        # python-is-python3 for the verifier (tests/run_tests.sh calls
+        # `python verify.py`, but Ubuntu 24.04 only ships /usr/bin/python3
+        # by default).  cmake + ninja for the build itself.  Direct
+        # apt-get (not cache-apt-pkgs-action) because OpenMPI installs
+        # mpicc/mpicxx through update-alternatives in its postinst --
+        # some cache actions extract .debs without running postinst,
+        # which leaves the wrappers unconfigured and find_package(MPI)
+        # failing.  HL is bundled into libhdf5-dev on 24.04 -- there is
+        # no separate libhdf5-hl-dev package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mpi-default-dev libhdf5-dev \
+            python3-numpy python-is-python3 \
+            cmake ninja-build
+
+      - name: Configure
+        # The top-level CMakeLists.txt is a thin wrapper that calls
+        # add_subdirectory(src).
+        run: cmake -S Maxwell_Penalty -B Maxwell_Penalty/build -G Ninja
+
+      - name: Build
+        run: cmake --build Maxwell_Penalty/build --parallel
+
+      - name: Run CTest
+        # --output-on-failure dumps the failing test's stdout/stderr
+        # directly into the GitHub log so first-level diagnosis needs
+        # no artifact download.  Only one ctest test is registered
+        # (the run_tests.sh wrapper, which contains 14 sub-tests), so
+        # --schedule-random would have no effect.
+        run: ctest --test-dir Maxwell_Penalty/build --output-on-failure
+
+      - name: Upload test artifacts on failure
+        # Captures the CTest LastTest.log plus any Var0_rank_*.json
+        # files that test_sync leaves behind on a failed run (the
+        # script rm's them on success).  Only fires when one of the
+        # previous steps failed -- a successful run uploads nothing.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-failure-${{ github.run_id }}
+          path: |
+            Maxwell_Penalty/build/Testing/Temporary/LastTest.log
+            Maxwell_Penalty/build/tests/Var0_rank_*.json
+          if-no-files-found: ignore
+          retention-days: 14
