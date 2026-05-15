@@ -1,5 +1,14 @@
 # Code Review: Multigrid Poisson Solver
 
+**Status: closed.**  All 18 review items have been addressed:
+16 resolved with code changes, 1 resolved as wontfix (§12 --
+tracker cap is correctly sized for the one-file-per-rank
+invariant), and 1 accepted as a documented limitation (§1 --
+the singular all-Neumann V-cycle plateau, gated on a use case
+that is not on the project's roadmap).  CTest is 15/15 green
+locally and on GitHub Actions; CI is wired up
+(`.github/workflows/multigrid-ctest.yml`).
+
 **Scope.**  A from-scratch review of the codebase on `main` at commit
 `a09677a` (the merge that brought the cell-centred work in).  Source
 inspected: every `.c`, `.h`, `.cc`, `.hpp`, `.cmake`, `.sh`, and `.py`
@@ -250,11 +259,23 @@ post-smoother) and reference textbook sections.
 Severity-ordered, highest first.  Per-item: **what** the issue is,
 **where** it lives, and a **suggested fix**.
 
-### 1. `manufactured_neumann_inhomog` -- V-cycle plateaus (known limitation)
+### 1. `manufactured_neumann_inhomog` -- V-cycle plateaus (accepted as documented limitation)
 
-**What.**  The singular all-Neumann inhomogeneous preset is the
-one CTest convergence entry that does not pass.  The V-cycle's
-defect plateaus around $10^{-2}$ instead of reaching $10^{-9}$;
+**Accepted as-is** for this review pass: the all-Neumann
+inhomogeneous use case is not on the project's roadmap, and
+the existing exclusion in `src/tests/CMakeLists.txt:60` with
+the explanatory comment at `tests/CMakeLists.txt:67-80` is a
+honest, conservative final state -- the failure mode is clearly
+documented rather than masked.
+
+The original analysis below stands as a record of the gap and
+the two plausible fix paths, so a future maintainer who *does*
+need all-Neumann inhomogeneous problems has the starting point.
+
+---
+
+**Original analysis.**  The V-cycle's defect on this preset
+plateaus around $10^{-2}$ instead of reaching $10^{-9}$;
 the empirical rate caps at $\sim 1.7$--$1.88$, just below the
 $[1.8, 2.3]$ acceptance band.  The discretisation itself is
 rate-2 (matches the other Neumann-bearing presets); the missing
@@ -263,12 +284,7 @@ constant-mode component that the per-iteration mean-zero
 projection then strips, so the defect oscillates around a
 non-zero stationary value rather than converging.
 
-**Where.**  The preset is registered in `problem_registry.c:322`
-but excluded from `CONVERGENCE_PRESETS` in
-`src/tests/CMakeLists.txt:60` (a clear comment explains why,
-`tests/CMakeLists.txt:67-80`).
-
-**Suggested fix.**  Either of:
+**Two plausible fixes if pursued.**
 
 * **Krylov-accelerated coarse solve.**  Replace the bottom-grid
   smoother iteration by a CG (or BiCGStab) inner solve that
@@ -279,12 +295,6 @@ but excluded from `CONVERGENCE_PRESETS` in
   VAR_DEF and VAR_SOL onto the orthogonal complement of the
   constant mode.  Cheaper and more local, but harder to argue
   the rate guarantee.
-
-This is the only outstanding correctness-adjacent gap.  Without
-it, the all-Neumann-inhomog problem is the one shape of input
-the solver doesn't fully handle.  If you don't need it, leaving
-it excluded is fine and the comment in `tests/CMakeLists.txt`
-already documents the limitation honestly.
 
 ### 2. 2D code paths are atrophied (landed: deleted)
 
@@ -508,48 +518,30 @@ top-level reports (`REVIEW.md`, `CELL_CENTERED.md`,
 
 ---
 
-## Recommendations (prioritised)
+## Recommendations -- final status
 
-If you want to ship a couple of improvements, here's the priority
-order:
+Every item is in its terminal state.
 
-1. **Update `multigrid.toml` to the tuned cell-centred defaults**
-   (items 7 + 8). **Done** -- sample now uses `n_smooth = 2,
-   n_iters = 40, min_cells = 2` with `tol = 1.0e-9` to match the
-   roundoff floor at the sample's `nx_cells = 256`.
-
-2. **Decide on the 2D code path** (item 2). **Done** -- deleted
-   entirely.  ~2100 lines removed; 15/15 CTest still pass; the
-   verifiers and bash scripts are pure 3D.
-
-3. **Wire `timer.{c,h}` into the V-cycle, or delete it** (item 3).
-   **Done** -- the V-cycle now instruments `pre_smooth`, `defect`,
-   `restrict`, `post_smooth`, and `prolong`; the driver prints a
-   per-phase rank-0 breakdown after the solve.  Item 11
-   (`NAME_LENGTH` shadow) is now disambiguatable on its own merits.
-
-4. **Refactor `apply_bc_3d` into a per-face helper** (item 4).
-   **Done** -- six clones collapsed into a single `apply_face_3d`
-   helper plus a 21-line dispatcher; -163 lines in
-   `src/gauss_seidel.c`.
-
-5. **Promote `APPLY_SOR_3D` from macro to `static inline`** (item
-   5).  **Done** -- macro replaced by `static inline
-   sor_update_3d` with the captured context bundled into
-   `struct sor_ctx_3d`.  No runtime regression.
-
-6. **Add CI** (item 17).  The test suite is good; have it run
-   automatically.
-
-7. **Tackle the singular all-Neumann limitation** (item 1).  Only
-   pursue if you have a use case that needs it -- the comment in
-   `tests/CMakeLists.txt` already documents the exclusion honestly,
-   which is acceptable for a teaching/research code.
-
-Items 9 (`LICENSE` location), 10 (`const`-ness), 11 (`NAME_LENGTH`
-shadowing), 12 (tracker cap), 13 (TODO markers), 16 (output more
-variables), and 18 (move historical plan docs) are minor polish
-worth doing if you're already touching the surrounding code.
+| # | Item | Status |
+|---|------|--------|
+| 1 | Singular all-Neumann V-cycle plateau | Accepted (out of scope) |
+| 2 | 2D code paths atrophied | Done -- deleted (~2100 LOC) |
+| 3 | `timer.{c,h}` was dead code | Done -- wired into V-cycle |
+| 4 | `apply_bc_3d` six near-clones | Done -- refactored (-163 LOC) |
+| 5 | `APPLY_SOR_3D` 65-line macro | Done -- promoted to `static inline` |
+| 6 | Neumann ghost repetition | Done (subsumed by item 4) |
+| 7 | `multigrid.toml` stale defaults | Done |
+| 8 | `min_cells` default mismatch | Done |
+| 9 | `LICENSE` location + missing project licence | Done -- GPL-3.0 at root, third-party in `LICENSES/` |
+| 10 | `gf_indx_3d` non-const pointer | Done |
+| 11 | `NAME_LENGTH` shadow | Done -- renamed to `TIMER_NAME_LENGTH` |
+| 12 | `MAX_TRACKED = 32` cap | Wontfix (correctly sized for one-file-per-rank) |
+| 13 | `TODO: FIX` markers | Done -- arg validation moved before MPI_Init, `pz` bug fixed |
+| 14 | `prolong_var_2d` Dirichlet skip | Done (subsumed by item 2) |
+| 15 | verifier 2D/3D shape probing | Done (subsumed by item 2) |
+| 16 | Driver only outputs VAR_SOL | Done -- optional `[output] write_defect / write_rhs` |
+| 17 | No CI | Done -- GitHub Actions, 15/15 green |
+| 18 | Historical plan docs at root | Done -- moved to `doc/history/` |
 
 ---
 
@@ -559,12 +551,24 @@ This is one of the cleaner research codes I've reviewed.  The
 algorithmic core is correct, well-tested, and well-documented; the
 build / test / output infrastructure is solid; the recent
 cell-centred work made the solver substantially faster and more
-accurate without breaking anything.  The issues above are
-overwhelmingly tech debt rather than bugs -- code that works fine
-but could be tidier, smaller, or more uniform.  The one real
-correctness limitation (singular all-Neumann V-cycle plateau, item
-1) is honestly documented and excluded from the test suite rather
-than masked.
+accurate without breaking anything.  The issues raised in this
+review were overwhelmingly tech debt rather than bugs -- code that
+worked fine but could be tidier, smaller, or more uniform.
 
-The path from "good" to "great" runs through items 1--6 above,
-roughly in that order.
+After the review pass, the project has:
+
+* Shed roughly 2,500 lines of code that no longer paid for
+  themselves (the 2D paths, the six-fold `apply_bc_3d` clones,
+  the 65-line `APPLY_SOR_3D` macro vs. its `static inline`
+  replacement).
+* Picked up things it should have had from the start: a project
+  licence at the repo root (GPL-3.0), CI that runs 15/15
+  ctest on every push to `main` and every PR, and inline
+  V-cycle profiling that surfaces a per-phase breakdown.
+* Surfaced one "works on my machine" gap that local ctest could
+  not have caught (an untracked `scripts/make_xdmf.py` that CI
+  flagged on its first successful run).
+* Documented its single remaining correctness limitation (item 1)
+  rather than masking it.
+
+Review closed.
