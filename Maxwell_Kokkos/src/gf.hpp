@@ -20,6 +20,7 @@
 #include <string>
 #include <cstdint>
 #include <cstdlib>
+#include <type_traits>
 
 extern "C" {
 #include "domain.h"
@@ -27,6 +28,19 @@ extern "C" {
 
 using Field3D = Kokkos::View<double***, Kokkos::LayoutLeft>;
 using Field1D = Kokkos::View<double*,   Kokkos::LayoutLeft>;
+
+/* The RHS kernels and SAT macros capture raw pointers from these Views
+ * and index them by hand as  ijk = i + j*nx + k*nx*ny  (i fastest).
+ * That arithmetic is only correct for LayoutLeft; a layout change would
+ * silently corrupt every stencil with no compile error.  Fail loudly
+ * instead. */
+static_assert(std::is_same<Field3D::array_layout,
+                           Kokkos::LayoutLeft>::value,
+              "Field3D must be LayoutLeft: stencil pointer arithmetic "
+              "assumes i-fastest (ijk = i + j*nx + k*nx*ny).");
+static_assert(std::is_same<Field1D::array_layout,
+                           Kokkos::LayoutLeft>::value,
+              "Field1D must be LayoutLeft.");
 
 /* Evolved variable: state + RK4 stage buffers + previous-step snapshot. */
 struct EvolField
