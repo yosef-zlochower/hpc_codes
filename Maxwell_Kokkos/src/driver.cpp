@@ -24,13 +24,17 @@ struct analytic_params_st analytic_params;
 
 int main(int argc, char **argv)
 {
-    MPI_Init(&argc, &argv);
+    if (MPI_Init(&argc, &argv) != MPI_SUCCESS)
+    {
+        std::fprintf(stderr, "MPI_Init failed\n");
+        return 1;
+    }
     Kokkos::initialize(argc, argv);
     int rc = 0;
     {
         int size, rank;
-        MPI_Comm_size(MPI_COMM_WORLD, &size);
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_ERROR(MPI_Comm_size(MPI_COMM_WORLD, &size));
+        MPI_ERROR(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
 
         if (argc != 2)
         {
@@ -139,6 +143,7 @@ int main(int argc, char **argv)
         const double dt = maxwell_params.cfl_factor * min_dspace;
         const int output_every = maxwell_params.output_every;
         const int checkpoint_every = maxwell_params.checkpoint_every;
+        const int out2d_z = maxwell_params.output_2d_z_plane; /* <0 = off */
 
         double t = 0.0;
         int it_start = 1;
@@ -148,6 +153,7 @@ int main(int argc, char **argv)
             read_checkpoint(&gfs, &t, &it_start);
             it_start += 1;
             set_output_counter_3D(it_start / output_every);
+            set_output_counter_2D_xy_h5(it_start / output_every);
             if (!rank)
                 std::fprintf(stderr,
                              "Resuming from iteration %d, t = %g\n",
@@ -187,6 +193,8 @@ int main(int argc, char **argv)
             maxwell_constraints(&gfs);
 #ifndef TIMING_ONLY
             output_gfs_3D_h5(&gfs);
+            if (out2d_z >= 0)
+                output_gfs_2D_xy_h5(&gfs, out2d_z);
 #endif
         }
         else
@@ -210,6 +218,8 @@ int main(int argc, char **argv)
                     if (rank == 0) std::printf("it %d, t %g\n", it, t);
                     maxwell_constraints(&gfs);
                     output_gfs_3D_h5(&gfs);
+                    if (out2d_z >= 0)
+                        output_gfs_2D_xy_h5(&gfs, out2d_z);
                     const double terr = l2_error_analytic(&gfs, t);
                     if (!rank)
                     {
@@ -238,6 +248,6 @@ int main(int argc, char **argv)
         cleanup_3d_domain(&gfs.domain);
     }
     Kokkos::finalize();
-    MPI_Finalize();
+    MPI_ERROR(MPI_Finalize());
     return rc;
 }

@@ -5,6 +5,7 @@
  * a host mirror copy (default).  See gf.hpp for the CommAxis layout. */
 
 #include "gf.hpp"
+#include "mpi_check.h"
 
 enum var_type
 {

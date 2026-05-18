@@ -57,6 +57,19 @@ int32_t get_integer32_value(const char *section, const char *element,
     return static_cast<int32_t>(res);
 }
 
+/* Optional 32-bit integer: returns `dflt` (no error) when the key is
+ * absent.  A present-but-wrong-type or out-of-range value is still a
+ * hard error. */
+int32_t get_integer32_value_or_default(const char *section,
+                                       const char *element,
+                                       toml::table &tbl, int32_t dflt)
+{
+    auto entry = tbl.at_path(path_of(section, element));
+    if (!entry)
+        return dflt;
+    return get_integer32_value(section, element, tbl);
+}
+
 double get_real_value(const char *section, const char *element,
                       toml::table &tbl)
 {

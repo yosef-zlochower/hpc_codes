@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <hdf5.h>
 #include <hdf5_hl.h>
@@ -15,12 +16,19 @@
 #include "io.h"
 #include "domain.h"
 #include "parameter.h"
+#include "alloc_check.h"
+#include "mpi_check.h"
 
 #define BUFF_LEN 512
 
-/* File-scope override for the output_gfs_3D_h5 static counter.
- * A value of -1 means "no override pending". */
-static int output_3d_counter_override = -1;
+/* File-scope one-shot overrides for the per-output static counters.
+ * A value of -1 means "no override pending"; the next call to the
+ * matching output_* routine adopts the value and clears it.  Used on
+ * checkpoint recovery so HDF5 group / file numbering continues from
+ * where the previous run left off instead of restarting at 0. */
+static int output_3d_counter_override       = -1;
+static int output_2d_xy_h5_counter_override = -1;
+static int output_2d_xy_counter_override    = -1;
 
 /* output_gf_metadata produces a metadata file. This function should
  * only be called once by a single rank.
@@ -64,6 +72,11 @@ void output_gfs_metadata(struct ngfs *gfs)
 void output_gfs_2D_xy(struct ngfs *gfs, const int global_k_index)
 {
     static int counter = 0;
+    if (output_2d_xy_counter_override >= 0)
+    {
+        counter = output_2d_xy_counter_override;
+        output_2d_xy_counter_override = -1;
+    }
     char name_buff[BUFF_LEN];
     const int gs = gfs->gs;
     const int64_t ni = gfs->nx;
@@ -107,6 +120,11 @@ void output_gfs_2D_xy(struct ngfs *gfs, const int global_k_index)
 void output_gfs_2D_xy_h5(struct ngfs *gfs, const int global_k_index)
 {
     static int counter = 0;
+    if (output_2d_xy_h5_counter_override >= 0)
+    {
+        counter = output_2d_xy_h5_counter_override;
+        output_2d_xy_h5_counter_override = -1;
+    }
     char filename[BUFF_LEN];
 
     const int gs = gfs->gs;
@@ -125,7 +143,7 @@ void output_gfs_2D_xy_h5(struct ngfs *gfs, const int global_k_index)
     double *data_buffer = NULL;
 
     data_buffer = malloc(sizeof(double) * ni * nj);
-    assert(data_buffer);
+    CHECK_ALLOC(data_buffer, "2D xy output buffer");
 
     for (int v = 0; v < gfs->n_evol_vars; v++)
     {
@@ -176,7 +194,7 @@ void output_gfs_3D_h5(struct ngfs *gfs)
 
     if (gfs->domain.rank == 0)
         fprintf(stderr, "Not safe to quit!\n");
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_ERROR(MPI_Barrier(MPI_COMM_WORLD));
     snprintf(filename, BUFF_LEN, "3D_rank_%d.h5", gfs->domain.rank);
 
     for (int v = 0; v < gfs->n_evol_vars; v++)
@@ -206,7 +224,7 @@ void output_gfs_3D_h5(struct ngfs *gfs)
                          gfs->auxvars[v]->new, gfs);
     }
     ++counter;
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_ERROR(MPI_Barrier(MPI_COMM_WORLD));
     if (gfs->domain.rank == 0)
     {
         fprintf(stderr, "Safe to quit\n");
@@ -220,19 +238,23 @@ void set_output_counter_3D(int value) {
     output_3d_counter_override = value;
 }
 
+void set_output_counter_2D_xy_h5(int value) {
+    /* Same one-shot override as set_output_counter_3D, for the HDF5
+     * xy-slice output (so post-recovery group numbering is continuous). */
+    output_2d_xy_h5_counter_override = value;
+}
+
+void set_output_counter_2D_xy(int value) {
+    /* Same one-shot override, for the gnuplot .asc xy-slice output. */
+    output_2d_xy_counter_override = value;
+}
+
 /* ── Checkpoint / Recovery ─────────────────────────────────────────────── */
 
-#define HDF5_CHK(fn_call)                                                      \
-    do                                                                         \
-    {                                                                          \
-        int _ec = fn_call;                                                     \
-        if (_ec < 0)                                                           \
-        {                                                                      \
-            fprintf(stderr, "HDF5 error in '%s' (line %d)\n", #fn_call,        \
-                    __LINE__);                                                 \
-            chk_errors++;                                                      \
-        }                                                                      \
-    } while (0)
+/* HDF5_CHK (abort-on-first-error) lives in hdf5_check.h, shared with
+ * HDF5BinaryWrite.c so the checkpoint and output paths behave the
+ * same way on a failed write. */
+#include "hdf5_check.h"
 
 /* ── Per-execution checkpoint tracking ──────────────────────────────── */
 /* We only ever delete checkpoints written during THIS execution,
@@ -252,21 +274,27 @@ static void delete_checkpoint_files(int old_it, int mpi_size, int my_rank)
 
 void write_checkpoint(struct ngfs *gfs, double t, int it, int max_checkpoints)
 {
-    int chk_errors = 0;
     char tmpname[BUFF_LEN], filename[BUFF_LEN];
     snprintf(tmpname,  BUFF_LEN, "checkpoint_it_%d_rank_%d.h5.tmp",
              it, gfs->domain.rank);
     snprintf(filename, BUFF_LEN, "checkpoint_it_%d_rank_%d.h5",
              it, gfs->domain.rank);
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_ERROR(MPI_Barrier(MPI_COMM_WORLD));
     if (gfs->domain.rank == 0)
         fprintf(stderr, "Writing checkpoint at t = %g, iteration %d ...\n",
                 t, it);
 
-    hid_t file_id;
-    HDF5_CHK(file_id = H5Fcreate(tmpname, H5F_ACC_TRUNC,
-                                  H5P_DEFAULT, H5P_DEFAULT));
+    hid_t file_id = H5Fcreate(tmpname, H5F_ACC_TRUNC,
+                              H5P_DEFAULT, H5P_DEFAULT);
+    if (file_id < 0)
+    {
+        fprintf(stderr,
+                "rank %d: cannot create checkpoint file '%s' "
+                "(disk full or permissions?) — aborting\n",
+                gfs->domain.rank, tmpname);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     /* ── /metadata group ────────────────────────────────────────────── */
     hid_t meta_id;
@@ -353,9 +381,9 @@ void write_checkpoint(struct ngfs *gfs, double t, int it, int max_checkpoints)
     HDF5_CHK(H5Fclose(file_id));
 
     /* Atomic rename: all ranks finish writing, then rename */
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_ERROR(MPI_Barrier(MPI_COMM_WORLD));
     rename(tmpname, filename);
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_ERROR(MPI_Barrier(MPI_COMM_WORLD));
 
     /* Track this checkpoint and delete old ones from this execution */
     if (n_tracked < MAX_TRACKED_CHECKPOINTS)
@@ -372,53 +400,107 @@ void write_checkpoint(struct ngfs *gfs, double t, int it, int max_checkpoints)
         n_tracked--;
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_ERROR(MPI_Barrier(MPI_COMM_WORLD));
     if (gfs->domain.rank == 0)
         fprintf(stderr, "Checkpoint complete.\n");
 }
 
-/* Find the highest iteration number among checkpoint files for this rank. */
-static int find_latest_checkpoint_iteration(int my_rank)
+/* A checkpoint set for iteration `it` is "complete" only if every rank's
+ * .h5 member exists AND no rank's .h5.tmp remains.  A surviving .tmp means
+ * that rank's write never finished its tmp→rename, so the set was caught
+ * mid-commit (e.g. the job was killed between the two write barriers) and
+ * must not be recovered from. */
+static int checkpoint_set_complete(int it, int mpi_size)
+{
+    char path[BUFF_LEN];
+    for (int r = 0; r < mpi_size; r++)
+    {
+        snprintf(path, BUFF_LEN, "checkpoint_it_%d_rank_%d.h5", it, r);
+        if (access(path, F_OK) != 0)
+            return 0;
+        snprintf(path, BUFF_LEN, "checkpoint_it_%d_rank_%d.h5.tmp", it, r);
+        if (access(path, F_OK) == 0)
+            return 0;
+    }
+    return 1;
+}
+
+/* Rank-0 only: highest iteration that has a *complete* checkpoint set.
+ * Returns -1 if none.  Run on a single rank and broadcast so every rank
+ * recovers from the same iteration even if a directory scan would race
+ * with a concurrent writer. */
+static int find_latest_complete_checkpoint(int mpi_size)
 {
     DIR *dir = opendir(".");
     if (!dir)
         return -1;
 
+    int *iters = NULL;
+    size_t n = 0, cap = 0;
     struct dirent *entry;
-    int latest_it = -1;
-
     while ((entry = readdir(dir)) != NULL)
     {
-        int found_it, found_rank;
-        if (sscanf(entry->d_name, "checkpoint_it_%d_rank_%d.h5",
-                   &found_it, &found_rank) == 2 &&
-            found_rank == my_rank &&
-            found_it > latest_it)
+        int found_it = -1, found_rank = -1, consumed = -1;
+        /* %n records how many characters matched; requiring it to equal
+         * the whole name rejects "..._rank_0.h5.tmp" (which would
+         * otherwise match the "...h5" prefix and be mistaken for a
+         * finished checkpoint). */
+        if (sscanf(entry->d_name, "checkpoint_it_%d_rank_%d.h5%n",
+                   &found_it, &found_rank, &consumed) == 2 &&
+            consumed == (int)strlen(entry->d_name) && found_it >= 0)
         {
-            latest_it = found_it;
+            if (n == cap)
+            {
+                cap = cap ? cap * 2 : 16;
+                int *grown = realloc(iters, cap * sizeof(int));
+                if (!grown)
+                {
+                    free(iters);
+                    closedir(dir);
+                    return -1;
+                }
+                iters = grown;
+            }
+            iters[n++] = found_it;
         }
     }
     closedir(dir);
-    return latest_it;
+
+    int best = -1;
+    for (size_t i = 0; i < n; i++)
+    {
+        if (iters[i] > best && checkpoint_set_complete(iters[i], mpi_size))
+            best = iters[i];
+    }
+    free(iters);
+    return best;
 }
 
 int read_checkpoint(struct ngfs *gfs, double *t, int *it)
 {
-    int chk_errors = 0;
     char filename[BUFF_LEN];
 
-    int latest_it = find_latest_checkpoint_iteration(gfs->domain.rank);
+    /* Discover on rank 0 and broadcast so all ranks agree on the
+     * iteration even under a racing writer / partial set. */
+    int latest_it = -1;
+    if (gfs->domain.rank == 0)
+        latest_it = find_latest_complete_checkpoint(gfs->domain.mpi_size);
+    MPI_ERROR(MPI_Bcast(&latest_it, 1, MPI_INT, 0, MPI_COMM_WORLD));
+
     if (latest_it < 0)
     {
-        fprintf(stderr, "rank %d: no checkpoint files found\n",
-                gfs->domain.rank);
+        if (gfs->domain.rank == 0)
+            fprintf(stderr,
+                    "No complete checkpoint set found (need "
+                    "checkpoint_it_<N>_rank_0..%d.h5 with no stray "
+                    ".h5.tmp). Aborting recovery.\n",
+                    gfs->domain.mpi_size - 1);
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
     snprintf(filename, BUFF_LEN, "checkpoint_it_%d_rank_%d.h5",
              latest_it, gfs->domain.rank);
 
-    hid_t file_id;
-    HDF5_CHK(file_id = H5Fopen(filename, H5F_ACC_RDONLY, H5P_DEFAULT));
+    hid_t file_id = H5Fopen(filename, H5F_ACC_RDONLY, H5P_DEFAULT);
     if (file_id < 0)
     {
         fprintf(stderr, "rank %d: cannot open checkpoint file '%s'\n",
@@ -522,5 +604,6 @@ int read_checkpoint(struct ngfs *gfs, double *t, int *it)
         fprintf(stderr, "Recovered from checkpoint: t = %g, iteration %d\n",
                 *t, *it);
 
-    return chk_errors;
+    /* HDF5_CHK aborts on any error, so reaching here means success. */
+    return 0;
 }

@@ -8,76 +8,61 @@
 #include "gf.h"
 #include "domain.h"
 
-#define HDF5_ERROR(fn_call)                                                    \
-    do                                                                         \
-    {                                                                          \
-        int _error_code = fn_call;                                             \
-                                                                               \
-        if (_error_code < 0)                                                   \
-        {                                                                      \
-            fprintf(stderr, "HDF5 call '%s' returned error code %d", #fn_call, \
-                    _error_code);                                              \
-            error_count++;                                                     \
-        }                                                                      \
-    } while (0)
+#include "hdf5_check.h"
 
 #include <hdf5.h>
 #include <hdf5_hl.h>
 
 static void create_string_attribute(hid_t id, const char *name, const char *val)
 {
-    int error_count = 0;
     hid_t dataspace_id;
     hid_t attribute_id;
     hid_t datatype;
     hsize_t oD1 = 1;
 
-    HDF5_ERROR(datatype = H5Tcopy(H5T_C_S1));
-    HDF5_ERROR(H5Tset_size(datatype, strlen(val) + 1));
-    HDF5_ERROR(dataspace_id = H5Screate_simple(1, &oD1, NULL));
-    HDF5_ERROR(attribute_id = H5Acreate(id, name, datatype, dataspace_id,
+    HDF5_CHK(datatype = H5Tcopy(H5T_C_S1));
+    HDF5_CHK(H5Tset_size(datatype, strlen(val) + 1));
+    HDF5_CHK(dataspace_id = H5Screate_simple(1, &oD1, NULL));
+    HDF5_CHK(attribute_id = H5Acreate(id, name, datatype, dataspace_id,
                                         H5P_DEFAULT, H5P_DEFAULT));
-    HDF5_ERROR(H5Awrite(attribute_id, datatype, val));
-    HDF5_ERROR(H5Aclose(attribute_id));
-    HDF5_ERROR(H5Sclose(dataspace_id));
-    HDF5_ERROR(H5Tclose(datatype));
+    HDF5_CHK(H5Awrite(attribute_id, datatype, val));
+    HDF5_CHK(H5Aclose(attribute_id));
+    HDF5_CHK(H5Sclose(dataspace_id));
+    HDF5_CHK(H5Tclose(datatype));
 }
 
 static void create_int_attribute(hid_t id, const char *name, const int val)
 {
-    int error_count = 0;
     hid_t dataspace_id;
     hid_t attribute_id;
     hsize_t oD1 = 1;
 
-    HDF5_ERROR(dataspace_id = H5Screate_simple(1, &oD1, NULL));
-    HDF5_ERROR(attribute_id = H5Acreate(id, name, H5T_NATIVE_INT, dataspace_id,
+    HDF5_CHK(dataspace_id = H5Screate_simple(1, &oD1, NULL));
+    HDF5_CHK(attribute_id = H5Acreate(id, name, H5T_NATIVE_INT, dataspace_id,
                                         H5P_DEFAULT, H5P_DEFAULT));
-    HDF5_ERROR(H5Awrite(attribute_id, H5T_NATIVE_INT, &val));
-    HDF5_ERROR(H5Aclose(attribute_id));
-    HDF5_ERROR(H5Sclose(dataspace_id));
+    HDF5_CHK(H5Awrite(attribute_id, H5T_NATIVE_INT, &val));
+    HDF5_CHK(H5Aclose(attribute_id));
+    HDF5_CHK(H5Sclose(dataspace_id));
 }
 
 static void create_double_attribute(hid_t id, const char *name,
                                     const double val)
 {
-    int error_count = 0;
     hid_t dataspace_id;
     hid_t attribute_id;
     hsize_t oD1 = 1;
 
-    HDF5_ERROR(dataspace_id = H5Screate_simple(1, &oD1, NULL));
-    HDF5_ERROR(attribute_id =
+    HDF5_CHK(dataspace_id = H5Screate_simple(1, &oD1, NULL));
+    HDF5_CHK(attribute_id =
                    H5Acreate(id, name, H5T_NATIVE_DOUBLE, dataspace_id,
                              H5P_DEFAULT, H5P_DEFAULT));
-    HDF5_ERROR(H5Awrite(attribute_id, H5T_NATIVE_DOUBLE, &val));
-    HDF5_ERROR(H5Aclose(attribute_id));
-    HDF5_ERROR(H5Sclose(dataspace_id));
+    HDF5_CHK(H5Awrite(attribute_id, H5T_NATIVE_DOUBLE, &val));
+    HDF5_CHK(H5Aclose(attribute_id));
+    HDF5_CHK(H5Sclose(dataspace_id));
 }
 
 static void write_metadata(hid_t file_id, const struct ngfs *gfs)
 {
-    int error_count = 0;
     const int local_ni = (int)gfs->nx;
     const int local_nj = (int)gfs->ny;
     const int local_nk = (int)gfs->nz;
@@ -104,7 +89,7 @@ static void write_metadata(hid_t file_id, const struct ngfs *gfs)
 
     hid_t group_id;
     char metaname[] = "/metadata";
-    HDF5_ERROR(group_id = H5Gcreate(file_id, metaname, H5P_DEFAULT, H5P_DEFAULT,
+    HDF5_CHK(group_id = H5Gcreate(file_id, metaname, H5P_DEFAULT, H5P_DEFAULT,
                                     H5P_DEFAULT));
 
     create_int_attribute(group_id, "ghost_zones", gfs->gs);
@@ -153,7 +138,7 @@ static void write_metadata(hid_t file_id, const struct ngfs *gfs)
         create_string_attribute(group_id, name, gfs->auxvars[i]->vname);
     }
 
-    HDF5_ERROR(H5Gclose(group_id));
+    HDF5_CHK(H5Gclose(group_id));
 }
 
 /******************************************************************************
@@ -184,7 +169,6 @@ int BinaryWriteArray(const char *filename, const char *groupname,
     hid_t file_id;
     herr_t status;
     int file_exists = 0;
-    int error_count = 0;
 
     H5E_BEGIN_TRY { file_exists = H5Fis_hdf5(filename) > 0; }
     H5E_END_TRY;
@@ -243,15 +227,10 @@ int BinaryWriteArray(const char *filename, const char *groupname,
     H5E_BEGIN_TRY { status = H5Ldelete(file_id, fullname, H5P_DEFAULT); }
     H5E_END_TRY;
 
-    HDF5_ERROR(H5LTmake_dataset_double(file_id, fullname, ndim, dim, data));
+    HDF5_CHK(H5LTmake_dataset_double(file_id, fullname, ndim, dim, data));
 
-    HDF5_ERROR(H5Fclose(file_id));
+    HDF5_CHK(H5Fclose(file_id));
 
-    if (error_count > 0)
-    {
-        fprintf(stderr, "Failed to write data to hdf5 file");
-        return -1;
-    }
 
     return 0;
 }

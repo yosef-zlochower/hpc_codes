@@ -35,6 +35,22 @@ int64_t get_integer_value(const char *section, const char *element,
     return INVALID_INTEGER;
 }
 
+/* Optional integer: returns `dflt` (no error) when the key is absent.
+ * A present-but-wrong-type value is still a hard error. */
+int64_t get_integer_value_or_default(const char *section, const char *element,
+                                     toml::table &tbl, int64_t dflt)
+{
+    auto entry = tbl.at_path(path_of(section, element));
+    if (!entry)
+        return dflt;
+    if (entry.is_integer())
+        return static_cast<int64_t>(*entry.as_integer());
+    std::cerr << "invalid " << section << "::" << element << " value\n"
+              << "Expected an integer, but didn't find an int\n";
+    parser_error++;
+    return dflt;
+}
+
 double get_real_value(const char *section, const char *element,
                       toml::table &tbl)
 {

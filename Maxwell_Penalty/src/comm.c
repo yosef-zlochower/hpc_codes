@@ -97,13 +97,15 @@ static void exchange_direction(struct ngfs *gfs, int nvars, int vstart,
     {
         if (rank_lower > INVALID_RANK)
         {
-            MPI_Isend(ax->lower.src, total_buff_size, MPI_DOUBLE,
-                      rank_lower, 0, cart_comm, &send_reqs[n_send++]);
+            MPI_ERROR(MPI_Isend(ax->lower.src, total_buff_size, MPI_DOUBLE,
+                                rank_lower, 0, cart_comm,
+                                &send_reqs[n_send++]));
         }
         if (rank_upper > INVALID_RANK)
         {
-            MPI_Isend(ax->upper.src, total_buff_size, MPI_DOUBLE,
-                      rank_upper, 1, cart_comm, &send_reqs[n_send++]);
+            MPI_ERROR(MPI_Isend(ax->upper.src, total_buff_size, MPI_DOUBLE,
+                                rank_upper, 1, cart_comm,
+                                &send_reqs[n_send++]));
         }
     }
     END_TIMER(send_timer)
@@ -112,17 +114,19 @@ static void exchange_direction(struct ngfs *gfs, int nvars, int vstart,
     {
         if (rank_lower > INVALID_RANK)
         {
-            MPI_Irecv(ax->lower.dst, total_buff_size, MPI_DOUBLE,
-                      rank_lower, 1, cart_comm, &recv_reqs[n_recv++]);
+            MPI_ERROR(MPI_Irecv(ax->lower.dst, total_buff_size, MPI_DOUBLE,
+                                rank_lower, 1, cart_comm,
+                                &recv_reqs[n_recv++]));
         }
         if (rank_upper > INVALID_RANK)
         {
-            MPI_Irecv(ax->upper.dst, total_buff_size, MPI_DOUBLE,
-                      rank_upper, 0, cart_comm, &recv_reqs[n_recv++]);
+            MPI_ERROR(MPI_Irecv(ax->upper.dst, total_buff_size, MPI_DOUBLE,
+                                rank_upper, 0, cart_comm,
+                                &recv_reqs[n_recv++]));
         }
 
         /* Wait for all receives to complete before unpacking */
-        MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE);
+        MPI_ERROR(MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE));
     }
     END_TIMER(recv_timer)
 
@@ -154,7 +158,7 @@ static void exchange_direction(struct ngfs *gfs, int nvars, int vstart,
     /* Wait for sends to complete before buffers can be reused */
     BEGIN_TIMER(wait_timer)
     {
-        MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE);
+        MPI_ERROR(MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE));
     }
     END_TIMER(wait_timer)
 }

@@ -49,6 +49,7 @@ extern "C" int parse_maxwell_parameters(struct maxwell_param_st *param,
     param->output_every     = parameters::get_positive_integer32_value   ("solver", "output_every",     tbl);
     param->checkpoint_every = parameters::get_nonnegative_integer32_value("solver", "checkpoint_every", tbl);
     param->max_checkpoints  = parameters::get_positive_integer32_value   ("solver", "max_checkpoints",  tbl);
+    param->output_2d_z_plane = parameters::get_integer32_value_or_default ("solver", "output_2d_z_plane", tbl, -1);
     param->recover         = parameters::get_boolean_value("solver", "recover", tbl, false) ? 1 : 0;
     param->use_dissipation = parameters::get_boolean_value("solver", "use_dissipation", tbl) ? 1 : 0;
     param->diss_coeff      = parameters::get_nonnegative_real_value("solver", "diss_coeff", tbl);

@@ -1,4 +1,5 @@
 #include "domain.h"
+#include "mpi_check.h"
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -162,8 +163,8 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
     int periods[3] = { bdry_z == PERIODIC, bdry_y == PERIODIC,
                        bdry_x == PERIODIC };
     int reorder = 0;
-    MPI_Cart_create(MPI_COMM_WORLD, 3, dims, periods, reorder,
-                    &domain->cart_comm);
+    MPI_ERROR(MPI_Cart_create(MPI_COMM_WORLD, 3, dims, periods, reorder,
+                              &domain->cart_comm));
 
     if (domain->cart_comm == MPI_COMM_NULL)
     {
@@ -172,7 +173,7 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
 
     /* Get this rank's coordinates in the Cartesian grid */
     int coords[3];
-    MPI_Cart_coords(domain->cart_comm, rank, 3, coords);
+    MPI_ERROR(MPI_Cart_coords(domain->cart_comm, rank, 3, coords));
     const int rank_z = coords[0];
     const int rank_y = coords[1];
     const int rank_x = coords[2];
@@ -180,9 +181,9 @@ int setup_3d_domain(const int nx_cpu, const int ny_cpu, const int nz_cpu,
     /* Get neighbor ranks via MPI_Cart_shift.
      * Dimension 0 = z, 1 = y, 2 = x (matches dims[] ordering). */
     int lower_x, upper_x, lower_y, upper_y, lower_z, upper_z;
-    MPI_Cart_shift(domain->cart_comm, 2, 1, &lower_x, &upper_x);
-    MPI_Cart_shift(domain->cart_comm, 1, 1, &lower_y, &upper_y);
-    MPI_Cart_shift(domain->cart_comm, 0, 1, &lower_z, &upper_z);
+    MPI_ERROR(MPI_Cart_shift(domain->cart_comm, 2, 1, &lower_x, &upper_x));
+    MPI_ERROR(MPI_Cart_shift(domain->cart_comm, 1, 1, &lower_y, &upper_y));
+    MPI_ERROR(MPI_Cart_shift(domain->cart_comm, 0, 1, &lower_z, &upper_z));
 
     /* setup_1d_domain computes local sizes and ghost zone counts.
      * We still pass bdry_type so it correctly adds ghost zones at
@@ -229,7 +230,7 @@ int cleanup_3d_domain(struct domain3d_st *domain)
 {
     if (domain->cart_comm != MPI_COMM_NULL)
     {
-        MPI_Comm_free(&domain->cart_comm);
+        MPI_ERROR(MPI_Comm_free(&domain->cart_comm));
         domain->cart_comm = MPI_COMM_NULL;
     }
     return 0;

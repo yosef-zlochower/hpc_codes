@@ -125,15 +125,17 @@ static void post_recvs_for_axis(AxisOp &op, int total_buf_size,
     if (!op.active) return;
     if (op.rank_lo > INVALID_RANK)
     {
-        MPI_Irecv(mpi_recv_ptr(op.ax->dst_lo_dev, op.ax->dst_lo_host),
-                  total_buf_size, MPI_DOUBLE, op.rank_lo, 1, cart_comm,
-                  &reqs[n_recv++]);
+        MPI_ERROR(MPI_Irecv(mpi_recv_ptr(op.ax->dst_lo_dev,
+                                         op.ax->dst_lo_host),
+                            total_buf_size, MPI_DOUBLE, op.rank_lo, 1,
+                            cart_comm, &reqs[n_recv++]));
     }
     if (op.rank_up > INVALID_RANK)
     {
-        MPI_Irecv(mpi_recv_ptr(op.ax->dst_up_dev, op.ax->dst_up_host),
-                  total_buf_size, MPI_DOUBLE, op.rank_up, 0, cart_comm,
-                  &reqs[n_recv++]);
+        MPI_ERROR(MPI_Irecv(mpi_recv_ptr(op.ax->dst_up_dev,
+                                         op.ax->dst_up_host),
+                            total_buf_size, MPI_DOUBLE, op.rank_up, 0,
+                            cart_comm, &reqs[n_recv++]));
     }
 }
 
@@ -144,15 +146,17 @@ static void post_sends_for_axis(AxisOp &op, int total_buf_size,
     if (!op.active) return;
     if (op.rank_lo > INVALID_RANK)
     {
-        MPI_Isend(mpi_send_ptr(op.ax->src_lo_dev, op.ax->src_lo_host),
-                  total_buf_size, MPI_DOUBLE, op.rank_lo, 0, cart_comm,
-                  &reqs[n_send++]);
+        MPI_ERROR(MPI_Isend(mpi_send_ptr(op.ax->src_lo_dev,
+                                         op.ax->src_lo_host),
+                            total_buf_size, MPI_DOUBLE, op.rank_lo, 0,
+                            cart_comm, &reqs[n_send++]));
     }
     if (op.rank_up > INVALID_RANK)
     {
-        MPI_Isend(mpi_send_ptr(op.ax->src_up_dev, op.ax->src_up_host),
-                  total_buf_size, MPI_DOUBLE, op.rank_up, 1, cart_comm,
-                  &reqs[n_send++]);
+        MPI_ERROR(MPI_Isend(mpi_send_ptr(op.ax->src_up_dev,
+                                         op.ax->src_up_host),
+                            total_buf_size, MPI_DOUBLE, op.rank_up, 1,
+                            cart_comm, &reqs[n_send++]));
     }
 }
 
@@ -240,7 +244,7 @@ int sync_vars(NGFS *gfs, var_type type, int kidx)
 
         BEGIN_TIMER(t_wait)
         {
-            MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE);
+            MPI_ERROR(MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE));
         }
         END_TIMER(t_wait)
 
@@ -262,7 +266,7 @@ int sync_vars(NGFS *gfs, var_type type, int kidx)
         }
         END_TIMER(t_unpack)
 
-        MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE);
+        MPI_ERROR(MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE));
     }
 
     }

@@ -530,7 +530,7 @@ double l2_error_analytic(NGFS *gfs, const double t)
                               (double)(k_end - k_start);
     double local_data[2]  = {error, local_npts};
     double global_data[2] = {0.0,   0.0};
-    MPI_Allreduce(local_data, global_data, 2, MPI_DOUBLE, MPI_SUM,
-                  MPI_COMM_WORLD);
+    MPI_ERROR(MPI_Allreduce(local_data, global_data, 2, MPI_DOUBLE, MPI_SUM,
+                            MPI_COMM_WORLD));
     return std::sqrt(global_data[0] / global_data[1]);
 }

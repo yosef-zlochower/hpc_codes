@@ -56,6 +56,8 @@ int64_t get_nonnegative_integer64_value(const char *section, const char *element
 
 int32_t get_integer32_value            (const char *section, const char *element,
                                         toml::table &tbl);
+int32_t get_integer32_value_or_default (const char *section, const char *element,
+                                        toml::table &tbl, int32_t dflt);
 int32_t get_positive_integer32_value   (const char *section, const char *element,
                                         toml::table &tbl);
 int32_t get_nonnegative_integer32_value(const char *section, const char *element,

@@ -1,6 +1,7 @@
 #ifndef COMM_H
 #define COMM_H
 #include "gf.h"
+#include "mpi_check.h"
 
 enum var_type
 {
@@ -15,17 +16,8 @@ enum var_type
  * Communication proceeds axis by axis: x, then y, then z. */
 int sync_vars(struct ngfs *gfs, enum var_type type);
 
-/* Abort on MPI error */
-#define MPI_ERROR(command)                                                     \
-    {                                                                          \
-        int mpires = command;                                                  \
-        if (mpires != MPI_SUCCESS)                                             \
-        {                                                                      \
-            fprintf(stderr, "MPI ERROR DETECTED in FILE %s, LINE %d\n",        \
-                    __FILE__, __LINE__);                                       \
-            MPI_Abort(MPI_COMM_WORLD, -1);                                     \
-        }                                                                      \
-    }
+/* MPI_ERROR (abort-on-error wrapper) now lives in mpi_check.h, included
+ * above, so domain.c and the Kokkos comm layer can share it. */
 
 /* Direction of data transfer between grid arrays and communication buffers */
 typedef enum

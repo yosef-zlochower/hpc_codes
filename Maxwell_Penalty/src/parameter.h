@@ -44,6 +44,9 @@ struct maxwell_param_st
     int     output_every;    /* output frequency (in iterations) */
     int     checkpoint_every; /* checkpoint frequency (0 = disabled) */
     int     max_checkpoints;  /* number of checkpoint sets to keep per run */
+    int     output_2d_z_plane; /* global k index of an xy-slice to dump as
+                                * HDF5 every output step; < 0 disables it
+                                * (optional, default -1) */
     int     recover;         /* 1 = recover from checkpoint, 0 = fresh start */
     int     use_dissipation; /* 1 = enable Kreiss-Oliger dissipation */
     double  diss_coeff;      /* dissipation coefficient */
@@ -100,6 +103,8 @@ void    increment_error();
 
 int64_t get_integer_value            (const char *section, const char *element,
                                       toml::table &tbl);
+int64_t get_integer_value_or_default (const char *section, const char *element,
+                                      toml::table &tbl, int64_t dflt);
 double  get_real_value               (const char *section, const char *element,
                                       toml::table &tbl);
 int64_t get_positive_integer_value   (const char *section, const char *element,
