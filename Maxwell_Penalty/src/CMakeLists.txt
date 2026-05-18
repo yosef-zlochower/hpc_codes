@@ -107,3 +107,13 @@ add_test(
     COMMAND bash ${TESTS_OUTPUT_DIR}/run_tests.sh
     WORKING_DIRECTORY ${TESTS_OUTPUT_DIR}
 )
+
+# Catch stale generated code: re-run generate_ccode.py and diff against
+# the committed simple_maxwell.h.  Skips cleanly if SymPy or clang-format
+# are unavailable; fails loudly on a real mismatch.
+add_test(
+    NAME generated_simple_maxwell_in_sync
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_generated_simple_maxwell.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/generate_ccode.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/simple_maxwell.h
+)
