@@ -1,4 +1,5 @@
 #include "gf.h"
+#include "alloc_check.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,11 +10,13 @@ static void comm_axis_alloc(struct comm_axis *ax, size_t face_size)
 {
     ax->face_size = face_size;
     ax->lower.src = calloc(face_size, sizeof(double));
+    CHECK_ALLOC(ax->lower.src, "comm axis lower.src");
     ax->lower.dst = calloc(face_size, sizeof(double));
+    CHECK_ALLOC(ax->lower.dst, "comm axis lower.dst");
     ax->upper.src = calloc(face_size, sizeof(double));
+    CHECK_ALLOC(ax->upper.src, "comm axis upper.src");
     ax->upper.dst = calloc(face_size, sizeof(double));
-    assert(ax->lower.src && ax->lower.dst &&
-           ax->upper.src && ax->upper.dst);
+    CHECK_ALLOC(ax->upper.dst, "comm axis upper.dst");
 }
 
 static void comm_axis_free(struct comm_axis *ax)
@@ -53,15 +56,17 @@ int ngfs_allocate(int n_evol_vars, int n_aux_vars, struct ngfs *ptr)
     comm_axis_alloc(&ptr->comm_z, ptr->nx * ptr->ny * ptr->gs * maxvars);
 
     ptr->vars = calloc(n_evol_vars + n_aux_vars, sizeof(struct gf *));
-    assert(ptr->vars);
+    CHECK_ALLOC(ptr->vars, "ngfs vars table");
 
     char *vname = NULL;
     const size_t name_length = 20;
     for (int i = 0; i < n_evol_vars; i++)
     {
         vname = calloc(name_length, sizeof(char));
+        CHECK_ALLOC(vname, "evolved gf name");
         snprintf(vname, name_length, "Var%d", i);
         ptr->vars[i] = calloc(1, sizeof(struct gf));
+        CHECK_ALLOC(ptr->vars[i], "evolved gf struct");
         gf_allocate(ptr->nx * ptr->ny * ptr->nz, ptr->gs, ptr->vars[i], vname);
         vname = NULL;
     }
@@ -71,8 +76,10 @@ int ngfs_allocate(int n_evol_vars, int n_aux_vars, struct ngfs *ptr)
     for (int i = 0; i < n_aux_vars; i++)
     {
         vname = calloc(name_length, sizeof(char));
+        CHECK_ALLOC(vname, "aux gf name");
         snprintf(vname, name_length, "Aux%d", i);
         ptr->auxvars[i] = calloc(1, sizeof(struct gf));
+        CHECK_ALLOC(ptr->auxvars[i], "aux gf struct");
         gf_aux_allocate(ptr->nx * ptr->ny * ptr->nz, ptr->gs, ptr->auxvars[i],
                         vname);
         vname = NULL;
@@ -122,20 +129,20 @@ int gf_allocate(int64_t n, int gs, struct gf *gptr, char *vname)
     gptr->n = n;
     gptr->gs = gs;
     gptr->old = calloc(n, sizeof(double));
+    CHECK_ALLOC(gptr->old, "evolved gf->old");
     gptr->new = calloc(n, sizeof(double));
+    CHECK_ALLOC(gptr->new, "evolved gf->new");
     gptr->K1 = calloc(n, sizeof(double));
+    CHECK_ALLOC(gptr->K1, "evolved gf->K1");
     gptr->K2 = calloc(n, sizeof(double));
+    CHECK_ALLOC(gptr->K2, "evolved gf->K2");
     gptr->K3 = calloc(n, sizeof(double));
+    CHECK_ALLOC(gptr->K3, "evolved gf->K3");
     gptr->K4 = calloc(n, sizeof(double));
+    CHECK_ALLOC(gptr->K4, "evolved gf->K4");
     gptr->dot = NULL;
 
     gptr->vname = vname;
-    assert(gptr->old);
-    assert(gptr->new);
-    assert(gptr->K1);
-    assert(gptr->K2);
-    assert(gptr->K3);
-    assert(gptr->K4);
 
     return 0;
 }
@@ -144,7 +151,7 @@ int gf_aux_allocate(int64_t n, int gs, struct gf *gptr, char *vname)
     gptr->n = n;
     gptr->gs = gs;
     gptr->new = calloc(n, sizeof(double));
-    assert(gptr->new);
+    CHECK_ALLOC(gptr->new, "aux gf->new");
     gptr->old = NULL;
     gptr->dot = NULL;
     gptr->K1 = NULL;
@@ -181,6 +188,7 @@ int gf_rename(struct gf *gptr, const char *name)
     }
 
     char *newname = calloc(s_len + 1, sizeof(char));
+    CHECK_ALLOC(newname, "gf_rename newname");
     strncpy(newname, name, s_len + 1);
     gptr->vname = newname;
 
