@@ -162,6 +162,10 @@ int main(int argc, char **argv)
         else
         {
             set_initial_data(&gfs, t);
+            /* The RHS differentiates the material fields (dx_ieps,
+             * dx_imu, dx_sigma), so their ghost zones must agree across
+             * ranks before the first step. */
+            sync_vars(&gfs, AUX);
 
             if (!rank) std::fprintf(stderr, "Testing Sync ... ");
             /* kidx = -1 syncs the `state` buffer directly — the C
@@ -185,7 +189,12 @@ int main(int argc, char **argv)
             if (!rank)
             {
                 error_file = std::fopen("l2_norm.dat", "w");
-                assert(error_file);
+                if (!error_file)
+                {
+                    std::fprintf(stderr,
+                                 "rank 0: cannot open l2_norm.dat\n");
+                    MPI_Abort(MPI_COMM_WORLD, 1);
+                }
                 std::printf("%20.16e %20.16e\n", t, terr);
                 std::fprintf(error_file, "%20.16e %20.16e\n", t, terr);
                 std::fflush(error_file);
@@ -202,7 +211,12 @@ int main(int argc, char **argv)
             if (!rank)
             {
                 error_file = std::fopen("l2_norm.dat", "a");
-                assert(error_file);
+                if (!error_file)
+                {
+                    std::fprintf(stderr,
+                                 "rank 0: cannot open l2_norm.dat\n");
+                    MPI_Abort(MPI_COMM_WORLD, 1);
+                }
             }
         }
 

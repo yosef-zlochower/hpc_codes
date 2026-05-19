@@ -68,6 +68,13 @@ int register_timer(const char *name)
         fprintf(stderr, "Timer name too long\n");
         exit(-1);
     }
+    if (active_timers >= NUM_TIMERS)
+    {
+        fprintf(stderr,
+                "Too many timers (max %d); increase NUM_TIMERS\n",
+                NUM_TIMERS);
+        exit(-1);
+    }
 
     strncpy(timers[active_timers].name, name, NAME_LENGTH - 1);
     timers[active_timers].name[NAME_LENGTH - 1] = '\0';
