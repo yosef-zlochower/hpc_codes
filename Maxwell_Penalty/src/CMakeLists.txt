@@ -36,6 +36,14 @@ target_include_directories(maxwell_core PUBLIC
     ${HDF5_INCLUDE_DIRS}
 )
 target_link_libraries(maxwell_core PUBLIC MPI::MPI_C)
+# Link OpenMP into the core object library so its sources compile with
+# -fopenmp (matching the documented toolchain) and so every binary that
+# embeds these objects links libgomp consistently — previously OpenMP
+# was attached only to maxwell_system, leaving the core sources and the
+# test binaries with an inconsistent OpenMP state.
+if(OpenMP_C_FOUND)
+    target_link_libraries(maxwell_core PUBLIC OpenMP::OpenMP_C)
+endif()
 
 # ── TOML parameter parsing (C++) ─────────────────────────────────────────────
 add_library(maxwell_params OBJECT parameter.cc maxwell_parameters.cc)
@@ -79,6 +87,12 @@ function(add_maxwell_test name)
         ${HDF5_HL_LIBRARIES}
         m
     )
+    # $<TARGET_OBJECTS:maxwell_core> contributes only the compiled
+    # objects, not maxwell_core's usage requirements, so the OpenMP
+    # runtime must be linked here explicitly too.
+    if(OpenMP_C_FOUND)
+        target_link_libraries(${name} PRIVATE OpenMP::OpenMP_C)
+    endif()
     set_target_properties(${name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${TESTS_OUTPUT_DIR}
     )

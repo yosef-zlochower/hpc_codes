@@ -3,6 +3,7 @@
 #include "comm.hpp"
 #include "gf.hpp"
 #include "rk4.hpp"
+#include "kokkos_exec_check.hpp"
 #include <Kokkos_Core.hpp>
 #include <mpi.h>
 #include <cstdio>
@@ -80,6 +81,7 @@ int main(int argc, char **argv)
     {
         int rank;
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        report_kokkos_exec_space(rank);
 
         const double dt1 = 0.01, dt2 = dt1 / 2.0;
         const int    n1 = 100,    n2 = 200;

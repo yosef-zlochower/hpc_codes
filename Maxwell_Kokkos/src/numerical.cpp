@@ -33,9 +33,15 @@ void apply_dissipation(NGFS *gfs, double diss_coeff, int kidx)
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
 
+    /* Dissipate only the locally-owned interior: skip the ghost layer
+     * (width gs; overwritten by the next sync_vars anyway) and the
+     * boundary-closure rows.  gs >= DISSIP5_HALF is asserted above so
+     * the 5-point stencil also stays in bounds. */
+    const int64_t lo = (gfs->gs > DISSIP5_HALF) ? gfs->gs : DISSIP5_HALF;
+
     using Range3D = Kokkos::MDRangePolicy<Kokkos::Rank<3>>;
-    Range3D pol({DISSIP5_HALF,        DISSIP5_HALF,        DISSIP5_HALF},
-                {nx - DISSIP5_HALF,   ny - DISSIP5_HALF,   nz - DISSIP5_HALF});
+    Range3D pol({lo,      lo,      lo},
+                {nx - lo, ny - lo, nz - lo});
 
     BEGIN_TIMER(diss_timer)
     {

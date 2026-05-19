@@ -12,8 +12,10 @@
  * !! Modifies ->dot in place.
  * !! must be called after the PDE RHS is in ->dot
  * !!
- * !! Dissipation does not alter the first three and last three gridpoints in
- * !! each direction (on global grid). This is a design choice. 
+ * !! Dissipation is applied only on the locally-owned interior: the
+ * !! ghost zones are skipped (they are overwritten by the next
+ * !! sync_vars, so dissipating them is wasted work) and so are the
+ * !! boundary-closure rows.  These are LOCAL indices, not global.
  * */
 
 #define DISSIP5_HALF 3  /* half-width of dissipation stencil */
@@ -46,17 +48,23 @@ void apply_dissipation(struct ngfs *gfs, double diss_coeff)
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
 
+    /* Skip the ghost layer (width gs) as well as keeping the 5-point
+     * stencil in bounds (half-width DISSIP5_HALF).  gs >= DISSIP5_HALF
+     * is asserted above, so this is just gs in practice, but the max()
+     * keeps it correct if that ever changes. */
+    const int64_t lo = (gfs->gs > DISSIP5_HALF) ? gfs->gs : DISSIP5_HALF;
+
     BEGIN_TIMER(diss_timer)
     {
         for (int var = 0; var < gfs->n_evol_vars; ++var)
         {
             double *var_dot = gfs->vars[var]->dot;
             const double *var_new = gfs->vars[var]->new;
-            for (int64_t k = DISSIP5_HALF; k < nz - DISSIP5_HALF; k++)
+            for (int64_t k = lo; k < nz - lo; k++)
             {
-                for (int64_t j = DISSIP5_HALF; j < ny - DISSIP5_HALF; j++)
+                for (int64_t j = lo; j < ny - lo; j++)
                 {
-                    for (int64_t i = DISSIP5_HALF; i < nx - DISSIP5_HALF; i++)
+                    for (int64_t i = lo; i < nx - lo; i++)
                     {
                         const int64_t ijk = ijk_indx(i, j, k, gfs);
                         var_dot[ijk] += coefx * DISSIP_any_5(var_new, ijk, di) +

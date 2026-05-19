@@ -3,6 +3,7 @@
  * restored. Drives both EVOLVED and AUX paths. */
 #include "comm.hpp"
 #include "gf.hpp"
+#include "kokkos_exec_check.hpp"
 #include <Kokkos_Core.hpp>
 #include <mpi.h>
 #include <cmath>
@@ -209,6 +210,7 @@ int main(int argc, char **argv)
         int mpi_size, mpi_rank;
         MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
         MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+        report_kokkos_exec_space(mpi_rank);
 
         if (argc < 4 || argc > 7)
         {
